@@ -1,9 +1,8 @@
-name: Release
+name: Release CLI
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -14,91 +13,100 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: ubuntu-22.04
-            args: ""
-          - platform: macos-latest
-            args: "--target universal-apple-darwin"
-          - platform: windows-latest
-            args: ""
-    runs-on: ${{ matrix.platform }}
+          - os: ubuntu-22.04
+            artifact: linux-x86_64
+            archive: map-my-network-linux-x86_64.tar.gz
+          - os: ubuntu-24.04-arm
+            artifact: linux-arm64
+            archive: map-my-network-linux-arm64.tar.gz
+          - os: macos-15
+            artifact: macos-arm64
+            archive: map-my-network-macos-arm64.tar.gz
+          - os: macos-15-intel
+            artifact: macos-x86_64
+            archive: map-my-network-macos-x86_64.tar.gz
+          - os: windows-latest
+            artifact: windows-x86_64
+            archive: map-my-network-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Add macOS cross targets
-        if: matrix.platform == 'macos-latest'
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
-          key: release-${{ matrix.platform }}
-
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+          workspaces: server
+          key: release-${{ matrix.artifact }}
+      - run: npm ci
+      - run: npm run build
+      - run: cargo build --release --locked --manifest-path server/Cargo.toml
+      - name: Smoke test CLI (Unix)
+        if: runner.os != 'Windows'
+        run: server/target/release/netcart --help
+      - name: Smoke test CLI (Windows)
+        if: runner.os == 'Windows'
+        run: server/target/release/netcart.exe --help
+      - name: Archive CLI (Unix)
+        if: runner.os != 'Windows'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          mkdir "map-my-network-${{ matrix.artifact }}"
+          cp "server/target/release/netcart" "map-my-network-${{ matrix.artifact }}/"
+          tar -czf "map-my-network-${{ matrix.artifact }}.tar.gz" "map-my-network-${{ matrix.artifact }}"
+      - name: Archive CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory "map-my-network-${{ matrix.artifact }}"
+          Copy-Item "server/target/release/netcart.exe" "map-my-network-${{ matrix.artifact }}/"
+          Compress-Archive "map-my-network-${{ matrix.artifact }}" "map-my-network-${{ matrix.artifact }}.zip"
+      - uses: actions/upload-artifact@v4
         with:
-          tagName: v__VERSION__
-          releaseName: "Network Cartographer v__VERSION__"
-          releaseBody: |
-            ## Network Cartographer v__VERSION__
+          name: map-my-network-${{ matrix.artifact }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
 
-            Desktop network monitor with traceroute paths on a 3D globe.
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: map-my-network-*
+          path: release-assets
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum map-my-network-* > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          body: |
+            ## Run it
 
-            ### Install
-
-            Download the asset for your OS from this release, then install as usual.
-
-            | Platform | Typical assets |
-            |----------|----------------|
-            | Linux | `.deb`, `.AppImage`, `.rpm` |
-            | macOS | `.dmg` / `.app` (may be unsigned — right-click → Open on first launch) |
-            | Windows | `.msi` / NSIS `.exe` (SmartScreen may warn until signed) |
-
-            See [CHANGELOG.md](https://github.com/jonbng/network-cartographer/blob/main/CHANGELOG.md) and the README for privacy notes and GeoLite2 setup.
-
-            ### Verify
-
-            Prefer building from source if you need full auditability:
+            macOS or Linux:
 
             ```bash
-            npm install
-            npm run tauri build
+            curl -fsSL https://github.com/jonbng/network-cartographer/releases/latest/download/run.sh | sh
             ```
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+
+            Windows PowerShell:
+
+            ```powershell
+            irm https://github.com/jonbng/network-cartographer/releases/latest/download/run.ps1 | iex
+            ```
+
+            The launcher selects the correct binary, verifies its SHA-256 checksum, runs it as the current user, and removes the temporary download after exit.
+          files: |
+            release-assets/*
+            scripts/run.sh
+            scripts/run.ps1

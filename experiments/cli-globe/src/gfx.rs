@@ -88,12 +88,7 @@ pub fn detect_cell_px() -> CellPx {
 /// - Halfblocks: 1×2 logical px/cell
 /// - Braille: 2×4 logical px/cell
 /// - Kitty: physical (cols·cell_w)×(rows·cell_h), capped
-pub fn framebuffer_size(
-    backend: GfxBackend,
-    cols: u16,
-    rows: u16,
-    cell: CellPx,
-) -> (u32, u32) {
+pub fn framebuffer_size(backend: GfxBackend, cols: u16, rows: u16, cell: CellPx) -> (u32, u32) {
     let cols = cols.max(2) as u32;
     let rows = rows.max(2) as u32;
     match backend {
@@ -219,9 +214,8 @@ impl Widget for BrailleImage<'_> {
                     for dx in 0..2usize {
                         let (r, g, b, luma) = samples[dx][dy];
                         // Favor lit dots on brighter samples for clearer continent edges.
-                        let on = luma >= threshold
-                            || (mean < 36 && luma + 18 >= mean)
-                            || luma >= 140; // always show bright path/marker pixels
+                        let on =
+                            luma >= threshold || (mean < 36 && luma + 18 >= mean) || luma >= 140; // always show bright path/marker pixels
                         if on {
                             mask |= DOT_BITS[dx][dy];
                             on_r += r as u32;
@@ -399,7 +393,7 @@ pub fn kitty_place_rgb(img: &RgbImage, cols: u16, rows: u16, image_id: u32) -> i
         if i == 0 {
             write!(
                 out,
-                "\x1b_Ga=T,f=24,t=d,q=2,C=1,i={image_id},s={w},v={h},c={cols},r={rows},m={more};{chunk}\x1b\\"
+                "\x1b_Ga=T,f=24,t=d,q=2,C=1,z=-1,i={image_id},s={w},v={h},c={cols},r={rows},m={more};{chunk}\x1b\\"
             )?;
         } else {
             write!(out, "\x1b_Gm={more};{chunk}\x1b\\")?;

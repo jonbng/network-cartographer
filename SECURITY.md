@@ -6,11 +6,11 @@
 |---------|-----------|
 | 0.1.x   | Yes       |
 
-## What Network Cartographer does
+## What Map My Network does
 
-Network Cartographer is a **local** network connection monitor. It reads OS socket tables and process metadata, runs traceroute tools, and may send **IP addresses** to third-party GeoIP APIs unless a local MaxMind database is configured.
+Map My Network is a **local** network connection monitor. It reads OS socket tables and process metadata, runs normal-user traceroute tools, and may send **IP addresses** to third-party GeoIP APIs unless a local MaxMind database is configured.
 
-It does **not** operate a Network Cartographer backend that receives your connection lists or process names.
+It does **not** operate a Map My Network backend that receives your connection lists or process names.
 
 ## Reporting a vulnerability
 
@@ -24,7 +24,7 @@ Prefer one of:
 Include:
 
 - Affected version or commit
-- OS and whether the app was elevated
+- OS, browser, and command-line options
 - Description of the issue and impact
 - Steps to reproduce (PoC if possible)
 
@@ -34,20 +34,20 @@ You should receive an acknowledgment within a few days when possible. We will co
 
 **In scope**
 
-- Privilege escalation or unexpected elevated behavior
+- Local API authorization bypass or DNS-rebinding issues
 - Path traversal or arbitrary code execution via app inputs
 - Unintended exfiltration of process names, full connection tables, or local files
-- CSP / IPC permission bypass in the Tauri webview
+- Cross-origin access to the loopback HTTP API
 
 **Out of scope**
 
 - Inaccuracy of third-party GeoIP or reverse DNS
 - Rate limits or ToS of external GeoIP services
 - OS traceroute tool behavior itself
-- Issues that only apply when the user intentionally runs as root/admin
+- Behavior caused by unsupported third-party traceroute variants
 
 ## Hardening tips for users
 
 - Prefer a local GeoLite2 City (and optional ASN) database: set `NETWORK_CARTOGRAPHER_MMDB` / `NETWORK_CARTOGRAPHER_ASN_MMDB` or place files under standard GeoIP paths (see README)
 - Enable **Local geo** in the UI when an MMDB is available to reduce online lookups
-- Run elevated only when needed (process attribution / privileged traceroute methods)
+- Keep the CLI bound to its default loopback address; do not place it behind a public proxy

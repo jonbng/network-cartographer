@@ -1,205 +1,184 @@
-# Network Cartographer
+# Map My Network
 
-Desktop app ([Tauri 2](https://v2.tauri.app/)) that shows **which applications** on your machine talk to the internet, **where** they connect, and **traceroute paths** to each remote host — on a live 3D globe.
+A local command-line network monitor with a browser-based 3D globe. It shows which applications are talking to the internet, where they connect, and the routes traffic takes to each destination.
 
-Works on **Linux, macOS, and Windows**.
+The command binds only to `127.0.0.1`, opens your default browser, and stops when you press Ctrl+C. There is no desktop WebView, tray process, installer, remote Map My Network monitoring service, or privileged runtime mode.
 
 [![CI](https://github.com/jonbng/network-cartographer/actions/workflows/ci.yml/badge.svg)](https://github.com/jonbng/network-cartographer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
-## Features
+## Try it now
 
-- Live list of apps with active TCP connections
-- Destinations (IP / reverse-DNS hostname + port)
-- Automatic background traceroutes (cached per IP, limited concurrency)
-- **Hop geolocation** (rDNS / IATA codes + free GeoIP + latency consistency checks)
-- **3D globe** path visualization ([Three.js](https://threejs.org/) / [globe.gl](https://globe.gl/))
-- Filter, external-only toggle, local-geo mode, re-trace selected or all
-- First-run privacy notice and About dialog (version + privacy summary)
-
-## Screenshots
-
-![Network Cartographer UI preview](docs/screenshot.png)
-
-*Live globe with per-app path colors, hop cities, and connection sidebar.*
-
-## Install (prebuilt)
-
-Download the latest installer from **[GitHub Releases](https://github.com/jonbng/network-cartographer/releases)**.
-
-| Platform | Assets |
-|----------|--------|
-| **Linux** | `.deb`, AppImage, optionally `.rpm` |
-| **macOS** | `.dmg` (builds may be **unsigned** — right-click → Open the first time, or allow in System Settings → Privacy & Security) |
-| **Windows** | `.msi` / NSIS `.exe` (SmartScreen may warn until code signing is configured) |
-
-Linux packages may list `traceroute` as a dependency. On Windows, `tracert` is built in. On macOS, `traceroute` is preinstalled.
-
-After install, optional offline GeoIP (recommended) is described below.
-
-## Develop
-
-### Prerequisites
-
-All platforms:
-
-- [Rust](https://www.rust-lang.org/) **1.88+**
-- [Node.js](https://nodejs.org/) 18+
-- Tauri system dependencies: [Prerequisites](https://v2.tauri.app/start/prerequisites/)
-
-**Linux (Debian/Ubuntu example)** — WebKitGTK, build tools, and `traceroute`:
+No clone, Node.js, Rust, installer, or account is required. On macOS or Linux:
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
-  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev traceroute
+curl -fsSL https://github.com/jonbng/network-cartographer/releases/latest/download/run.sh | sh
 ```
 
-**macOS**
+On Windows, paste this into PowerShell:
 
-- Xcode Command Line Tools: `xcode-select --install`
-- `traceroute` is preinstalled (BSD flags; Network Cartographer does not use Linux-only options)
-- See Tauri’s [macOS prerequisites](https://v2.tauri.app/start/prerequisites/#macos)
+```powershell
+irm https://github.com/jonbng/network-cartographer/releases/latest/download/run.ps1 | iex
+```
 
-**Windows**
+The launcher downloads the latest release to a temporary directory, runs it as your current user, opens the UI, and removes the binary when you stop it with Ctrl+C. The scripts and release binaries are public and auditable in this repository.
 
-- [MSVC C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (Desktop development with C++)
-- [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (usually already installed on Windows 10/11)
-- `tracert` is built into Windows
-- See Tauri’s [Windows prerequisites](https://v2.tauri.app/start/prerequisites/#windows)
+## Features
 
-### Run
+- Live per-application TCP connection monitoring
+- Destination IP, hostname, port, organization, and unique connection activity
+- Optional per-application upload/download rates on Linux via kernel socket diagnostics
+- Background unprivileged traceroutes with bounded concurrency
+- Hop geolocation with local MaxMind and optional online fallbacks
+- Interactive Three.js / globe.gl visualization
+- Application focus, search, route history, and density controls
+- All monitoring data stays in the local CLI process
+
+## Run from source
+
+Requirements:
+
+- Rust 1.88+
+- Node.js 18+
+- A modern browser
+- Optional: the platform's `traceroute`, `tracepath`, or `tracert` command
+
+```bash
+git clone https://github.com/jonbng/network-cartographer.git
+cd network-cartographer
+npm install
+npm start
+```
+
+`npm start` builds the UI, starts the local server, and opens the browser. Stop it with Ctrl+C.
+
+## Install the CLI locally
+
+Build the frontend once, then install the Rust command into your Cargo bin directory:
 
 ```bash
 npm install
-npm run tauri dev
+npm run build
+cargo install --path server
+netcart
 ```
 
-### Build release
+This is a user-local Cargo installation and does not need a system installer.
+
+Prebuilt release archives contain a single `netcart` binary with the UI embedded. Releases currently cover Linux x64/ARM64, macOS Intel/Apple Silicon, and Windows x64.
+
+## Command options
+
+```text
+netcart [--port PORT] [--no-open]
+
+--port PORT  Local port (default: 4769)
+--no-open    Start the server without opening a browser
+```
+
+The server deliberately listens only on loopback. It is not intended to be exposed to a LAN or the public internet.
+
+## Development
+
+Run the complete embedded-UI application:
 
 ```bash
-npm run tauri build
+npm start
 ```
 
-Installers land under `src-tauri/target/release/bundle/` (platform-dependent: `.deb`, `.rpm`, AppImage, `.dmg`, `.msi` / NSIS `.exe`, etc.).
-
-For store-quality icons (`.icns` / `.ico`), generate from a square master PNG:
+For frontend hot reload, run the backend and Vite in separate terminals:
 
 ```bash
-npm run tauri icon path/to/app-icon-1024.png
+cargo run --manifest-path server/Cargo.toml -- --no-open
+npm run frontend:dev
 ```
+
+Vite proxies `/api` to the local server on port 4769.
+
+Checks:
+
+```bash
+npm run check
+npm test
+```
+
+Release build:
+
+```bash
+npm run build
+cargo build --release --locked --manifest-path server/Cargo.toml
+```
+
+The executable is written to `server/target/release/`.
 
 ## Architecture
 
-```
-ui/                 Vite + TypeScript frontend + globe.gl
-src-tauri/          Tauri v2 + Rust backend
+```text
+ui/                 Vite + TypeScript + globe.gl browser UI
+server/             Rust CLI, local HTTP API, and embedded UI assets
   src/collect/      OS socket tables → process map
-  src/model/        Aggregation by app / destination
+  src/model/        Aggregation by application and destination
   src/resolve/      Reverse DNS workers
-  src/trace/        Traceroute queue + parsers
-  src/geo/          Hop geolocation (rDNS, GeoIP, latency refine)
-  src/monitor.rs    Background poll + geo warmer, emits events
-  src/commands.rs   invoke() API for the UI
-experiments/        Unsupported experiments (e.g. terminal globe) — not part of the desktop app
+  src/trace/        Unprivileged traceroute queue and parsers
+  src/geo/          Hop geolocation and confidence refinement
+  src/monitor.rs    Connection monitor and snapshot generation
+  src/server.rs     Loopback HTTP/SSE server and browser launcher
+experiments/        Unsupported interface experiments
 ```
 
-The frontend listens to `monitor-update` events and calls commands via `@tauri-apps/api/core` `invoke`.
+The browser reads snapshots through a same-origin localhost API. Live updates use Server-Sent Events. Mutating requests require a non-simple local action header, and no cross-origin access is enabled.
 
-### Geolocation methodology (simplified GeoTraceroute-style)
+## Traceroute behavior
 
-Not 100% accurate — backbone GeoIP is often wrong. The app:
+Map My Network never changes users or requests extra permissions. It uses normal-user probe modes only:
 
-1. Parses reverse DNS for IATA/airport codes and city names
-2. Optionally uses a local **MaxMind GeoLite2-City.mmdb** if present on disk
-3. Batch-looks up via [ip-api.com](http://ip-api.com/batch) (free tier is **HTTP-only**; up to 40 IPs/cycle)
-4. Falls back to [ipwho.is](https://ipwho.is) when still missing
-5. Boosts confidence when sources agree; scores with latency vs distance
-6. Relocates implausible GeoIP hops (RTT too small / path oscillation)
-7. Caches full geolocated paths so UI snapshots stay cheap
+| OS | Probe method |
+|----|--------------|
+| Linux | UDP `traceroute`, then `tracepath` fallback |
+| macOS / BSD | UDP `traceroute` |
+| Windows | Built-in `tracert` |
 
-**Optional offline DB:** place `GeoLite2-City.mmdb` (and optional `GeoLite2-ASN.mmdb`) where Network Cartographer can find them, or set:
+If no supported command is installed, connection monitoring still works and route entries report the traceroute error.
+
+## Geolocation
+
+Geolocation is approximate. The app combines reverse DNS hints, airport codes, GeoIP, latency consistency, and neighboring hops.
+
+For fully local lookups, provide MaxMind databases with either environment variables or standard data directories:
 
 | Variable | Purpose |
 |----------|---------|
 | `NETWORK_CARTOGRAPHER_MMDB` | Absolute path to GeoLite2-City.mmdb |
 | `NETWORK_CARTOGRAPHER_ASN_MMDB` | Absolute path to GeoLite2-ASN.mmdb |
 
-With a MaxMind [license key](https://www.maxmind.com/en/accounts/current/license-key):
+Common locations include the project root, `data/`, the directory beside the binary, `~/.local/share/GeoIP/`, `~/Library/Application Support/GeoIP/`, and `%LOCALAPPDATA%\GeoIP\`.
 
-```bash
-export MAXMIND_LICENSE_KEY=your_key
-./scripts/update-geolite2.sh
-```
-
-| Location | Platforms |
-|----------|-----------|
-| Project root or `data/` (cwd / next to binary) | all |
-| `~/.local/share/GeoIP/` | Linux (and other Unix) |
-| `/usr/share/GeoIP/` or `/var/lib/GeoIP/` | Linux |
-| `~/Library/Application Support/GeoIP/` or `…/network-cartographer/` | macOS |
-| `%LOCALAPPDATA%\GeoIP\` or `%LOCALAPPDATA%\network-cartographer\` | Windows |
-| `%USERPROFILE%\GeoLite2-City.mmdb` | Windows |
-
-Do **not** commit MaxMind databases (they are gitignored; check MaxMind’s license).
-
-### Traceroute quality
-
-Methods depend on the OS (best successful path kept). Tuned for speed: 1 probe/hop where supported, short waits, max 20 hops, 6 concurrent workers, ~28s kill timeout.
-
-| OS | Methods (in order) |
-|----|--------------------|
-| **Linux** | TCP/443 (`-T`, often needs root) → ICMP (`-I`) → UDP → `tracepath`; parallel probes (`-N 32`) |
-| **macOS** | ICMP (`-I`) → UDP (BSD `traceroute`; no Linux-only `-T`/`-N`) |
-| **Windows** | `tracert -d` (ICMP; `-6` when the target is IPv6) |
-
-## Privileges
-
-Process names and privileged traceroute methods work better elevated:
-
-| OS | Tip |
-|----|-----|
-| Linux | `sudo` if many sockets show without pid, or for TCP/ICMP traceroute |
-| macOS | Run as admin if process attribution is incomplete; ICMP may need privileges (UDP fallback still runs) |
-| Windows | Run as Administrator if process names are often `unknown` |
+Do not commit MaxMind databases; they are ignored by Git and remain subject to MaxMind's license.
 
 ## Privacy
 
-- Monitoring is **local**: the app reads OS socket tables and process metadata on your machine.
-- Connection lists and process names are **not** uploaded to a Network Cartographer backend.
-- For map placement, **IP addresses** (hop / destination) may be sent to third-party GeoIP APIs (`ip-api.com`, `ipwho.is`) and reverse DNS may be queried.
-- Free **ip-api.com** batch lookups use **HTTP** (not HTTPS); prefer a local GeoLite2 MMDB to avoid that path.
-- Use a local GeoLite2 MMDB and/or the **Local geo** toggle to reduce or avoid online GeoIP calls.
-- Free GeoIP services have their own terms and rate limits.
-- A first-run privacy notice must be accepted before continuing (stored in app settings).
+- Socket tables, process names, connection lists, and settings are handled locally.
+- The server binds only to `127.0.0.1`.
+- The browser UI and API are served by the CLI process.
+- Online GeoIP can send hop and destination IP addresses to `ip-api.com` or `ipwho.is` after the first-run privacy notice is accepted.
+- Reverse DNS may query hostnames and airport codes.
+- Enable **Local geolocation** with a GeoLite2 database to avoid online GeoIP lookups.
 
-See also [SECURITY.md](./SECURITY.md).
+See [SECURITY.md](./SECURITY.md) for reporting guidance.
 
 ## Limitations
 
-- HTTPS URLs/paths are not visible (encrypted)
-- UDP connection peers are not currently listed; the cross-platform collector only exposes local UDP binds
-- Traceroute needs the OS tool installed
-- Short-lived connections may be missed between polls
-- Free GeoIP is rate-limited; offline MMDB avoids that
-- Prebuilt macOS/Windows binaries may be unsigned until signing is configured
-
-## Contributing
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) and the [Code of Conduct](./CODE_OF_CONDUCT.md).
-
-Issues and pull requests are welcome.
-
-1. Fork and clone
-2. `npm install` then `npm run tauri dev`
-3. Keep changes focused; match existing style
-4. Open a PR with a short description of *what* and *why*
+- HTTPS paths and payloads remain encrypted and are not visible.
+- UDP peers are not currently collected cross-platform.
+- Short-lived connections may disappear between polling intervals. Connections observed before teardown keep their exact socket-to-process attribution through `TIME_WAIT`.
+- Sockets whose owner cannot be proven are shown separately as **Unattributed traffic** rather than being presented as an application.
+- Per-application byte rates require native OS telemetry and are reported as unavailable by the portable collector.
+- Free online GeoIP services have rate limits and their own terms.
 
 ## License
 
 [MIT](./LICENSE) © Jonathan Bangert
 
-Earth texture and third-party attribution: [docs/ATTRIBUTIONS.md](./docs/ATTRIBUTIONS.md).
+Earth texture and dependency attribution: [docs/ATTRIBUTIONS.md](./docs/ATTRIBUTIONS.md).
 
-## Changelog
-
-See [CHANGELOG.md](./CHANGELOG.md).
+See [CHANGELOG.md](./CHANGELOG.md) for release history.

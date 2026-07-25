@@ -1,87 +1,66 @@
-# Network Cartographer CLI experiment (terminal-native)
+# Network Cartographer terminal frontend
 
-**No HTML. No WebView. No Carbonyl.** This is a separate crate under `experiments/` that does **not** modify Network Cartographer core source.
+A terminal-native frontend for Network Cartographer. It uses the same Rust
+monitor, snapshot DTOs, settings, collectors, traceroute engine, and GeoIP
+pipeline as the browser product—without starting the HTTP server or a browser.
 
-## What this is testing
-
-Can we rebuild Network Cartographer’s *feel* as a **native TUI** that uses modern terminal capabilities?
-
-| Layer | Approach |
-|-------|----------|
-| Globe | Software-rendered equirectangular sphere + great-circle arcs → RGB framebuffer |
-| High-res pixels | **Kitty graphics protocol** (Kitty, Ghostty, …) — real bitmaps in the terminal |
-| Fallback | **Unicode halfblocks** (`▀` + truecolor fg/bg) — ~2× vertical resolution, works everywhere |
-| Chrome | **ratatui** — header, app sidebar, keybindings |
-
-This is the right direction for “the whole UI in the CLI,” not “run Chromium and paint HTML into cells.”
-
-## Why this works in 2025–2026
-
-Modern terminal emulators are no longer character-only:
-
-1. **Kitty graphics protocol** — stream RGB/PNG into the terminal at **font-pixel** resolution; replace frames in place for animation.
-2. **Sixel / iTerm2** — same idea, different encoding (usable via crates like `ratatui-image` later).
-3. **Truecolor + Unicode mosaics** — halfblocks / braille / sextants give dense “fake pixels” without any graphics protocol.
-4. **Mature TUI stacks** — `ratatui` (Rust), Charm Bubble Tea, Ink, Notcurses — production TUIs with mouse, layout, and (via helpers) images.
-
-For a live globe, the winning architecture is:
-
-```
-Rust backend (reuse Network Cartographer collect/trace/geo later)
-        │
-        ▼
-Software or GPU offscreen globe → RGBA frame
-        │
-        ├─► Kitty/Sixel/iTerm2  (sharp, high DPI)
-        └─► halfblocks/braille  (portable fallback)
-        │
-        ▼
-ratatui chrome (lists, filters, status)
-```
-
-The existing Tauri + globe.gl UI stays the desktop product; this experiment is a **second front-end** on the same data.
+The globe is software-rendered and displayed through Kitty graphics when
+available, with Unicode Braille and half-block fallbacks.
 
 ## Run
-
-From the repo root (or this directory):
 
 ```bash
 cd experiments/cli-globe
 cargo run --release
 ```
 
-Optional:
+The first launch shows the same privacy choice as desktop. Select online or
+local-only GeoIP before monitoring starts. Settings are shared with desktop.
+
+For representative data without reading live sockets:
 
 ```bash
-# force backend
-NETWORK_CARTOGRAPHER_GFX=braille    cargo run --release   # default portable
-NETWORK_CARTOGRAPHER_GFX=halfblocks cargo run --release
-NETWORK_CARTOGRAPHER_GFX=kitty      cargo run --release   # needs Kitty/Ghostty/etc.
+cargo run --release -- --demo
+```
 
-# non-interactive smoke: write a PNG of one frame
+Render a non-interactive PNG smoke-test:
+
+```bash
 cargo run --release -- --dump-frame
 ```
 
-### Keys & mouse
+## Navigation
 
 | Input | Action |
-|-----|--------|
-| **click-drag on globe** | Orbit (yaw / pitch) |
-| scroll on globe | Zoom |
-| `←` `→` `↑` `↓` | Orbit |
-| `space` | Toggle spin (off by default) |
+|---|---|
+| `Tab` / `Shift+Tab` | Switch Applications / Globe pane |
+| `↑` / `↓` | Navigate applications, or orbit while Globe is active |
+| `←` / `→` | Orbit while Globe is active |
+| `Enter` | Expand and exclusively focus an application |
+| `Space` | Add/remove an application from multi-focus |
+| `/` | Filter by app, host, IP, organization, city, or hop |
+| `Esc` | Close an overlay, show all, or clear the filter |
+| `r` | Recenter on active paths |
+| `g` | Cycle all hops / destinations / hubs |
+| `l` | Toggle destination labels |
+| `a` | Toggle directional data-flow pulses |
+| `t` | Re-trace all destinations |
+| `s` | Settings |
+| `?` | Help |
+| `d` | Renderer diagnostics and backend selection |
+| `p` | Toggle auto-rotate |
 | `+` / `-` / `0` | Zoom in / out / reset |
-| `tab` | Focus next app |
-| `b` / `h` / `k` | Braille / halfblocks / kitty |
+| mouse drag / scroll | Orbit / zoom globe |
 | `q` | Quit |
 
-### Graphics backends
+At widths below 96 columns, one pane is shown at a time and `Tab` switches
+between them. Wider terminals use the desktop-style applications sidebar on
+the left and globe on the right.
 
-| Backend | Density | Notes |
-|---------|---------|--------|
-| **braille** (default when no Kitty) | 2×4 dots/cell | ~4× halfblocks; best portable quality |
-| **halfblocks** | 1×2 px/cell | Classic `▀` truecolor |
-| **kitty** | real pixels | Kitty / Ghostty; needs correct cell size |
+## Graphics backends
+
+Backend selection is automatic. Open diagnostics with `d`, then use `b`, `h`,
+or `k` to switch. It can also be forced before launch:
 
 ```bash
 NETWORK_CARTOGRAPHER_GFX=braille cargo run --release
@@ -89,37 +68,35 @@ NETWORK_CARTOGRAPHER_GFX=halfblocks cargo run --release
 NETWORK_CARTOGRAPHER_GFX=kitty cargo run --release
 ```
 
-### Rendering notes
+| Backend | Density | Notes |
+|---|---|---|
+| Kitty | Real pixels | Best in Kitty and Ghostty |
+| Braille | 2×4 dots/cell | Portable default, highest text-cell density |
+| Half-blocks | 1×2 pixels/cell | Broad truecolor fallback |
 
-- Framebuffer is sized to the **panel’s display aspect** (accounts for tall character cells) so the sphere stays round, not stretched.
-- Frames are wrapped in **DEC synchronized update** (`CSI ?2026`) to reduce flicker.
-- Kitty path **ping-pongs** two image ids and marks the globe cells as `skip` so ratatui doesn’t wipe the bitmap mid-frame.
-- Prefer **`b` (braille)** if Kitty flickers or stretches — denser mosaic, no graphics protocol.
+The framebuffer accounts for terminal cell aspect ratio and frames are wrapped
+in DEC synchronized updates. Braille and half-block modes use short native
+terminal-text destination labels; Kitty composites compact pixel labels into
+the high-resolution image itself. The Kitty path ping-pongs image IDs to avoid
+blanking between frames.
 
-### Texture
+## Architecture
 
-Uses `ui/public/earth-dark.jpg` from the main app (or set `NETWORK_CARTOGRAPHER_EARTH=/path/to.jpg`).
+```text
+Shared Rust monitor + SnapshotDto
+              │
+              ▼
+       data source thread
+              │
+              ▼
+ app state/actions ──► responsive ratatui chrome
+              │
+              └──────► software globe framebuffer
+                              ├─ Kitty graphics
+                              ├─ Braille
+                              └─ half-blocks
+```
 
-## Recommended terminals
-
-| Terminal | Best path |
-|----------|-----------|
-| **Kitty** | Kitty protocol (pixel) |
-| **Ghostty** | Kitty protocol |
-| **WezTerm** | iTerm2/Kitty (try `NETWORK_CARTOGRAPHER_GFX=kitty` or halfblocks) |
-| **foot** | Sixel (wire via `ratatui-image` later) or halfblocks |
-| **Pretty much anything else** | Halfblocks (still looks good) |
-
-## Next steps (if the experiment sticks)
-
-1. Wire **real** monitor snapshots (IPC to the Tauri/Rust core, or link Network Cartographer crates as a library).
-2. Swap the soft sphere for a faster path (SIMD, or offscreen `wgpu` → same framebuffer).
-3. Use `ratatui-image` + `ThreadProtocol` for automatic protocol detection and non-blocking encode.
-4. Braille mode for denser fallback (2×4 dots/cell).
-5. Keep core `src-tauri` / `ui` untouched — CLI stays a sibling frontend.
-
-## Non-goals of this folder
-
-- Not a replacement for the desktop app yet
-- Not shipping as the main binary
-- Not modifying `ui/` or `src-tauri/`
+The desktop shell remains enabled by the backend crate's default `desktop`
+feature. This crate disables that feature, so live monitoring is shared without
+linking the HTTP server or browser-launch code.

@@ -3,9 +3,9 @@ const PRIVACY_KEY = "network-cartographer.privacy.accepted";
 
 const TIPS = [
   "Drag to orbit the globe · scroll to zoom (globe only, not the page)",
-  "Pink ★ markers are final destinations · colors match apps in the sidebar",
+  "Pink ★ markers are confirmed destinations · amber ◌ markers are partial routes",
   "Click an app to focus its paths · Shift-click to multi-select",
-  "Hover a hop to see every app going through that node · Recenter frames traffic",
+  "Select a destination or globe node to inspect hops, networks, and location confidence",
 ];
 
 export type OnboardingOptions = {
@@ -24,8 +24,8 @@ function mountPrivacyModal(onAccept: () => void | Promise<void>): void {
     <div class="modal-card">
       <h2 id="privacy-title">Privacy notice</h2>
       <p>
-        <strong>Network Cartographer</strong> monitors network connections <em>on this machine</em>.
-        Connection lists and process names stay local — they are not uploaded to a Network Cartographer server.
+        <strong>Map My Network</strong> monitors network connections <em>on this machine</em>.
+        Connection lists and process names stay local — they are not uploaded to a Map My Network server.
       </p>
       <ul>
         <li>
@@ -41,7 +41,7 @@ function mountPrivacyModal(onAccept: () => void | Promise<void>): void {
         <code>NETWORK_CARTOGRAPHER_MMDB</code> (see README). Free ip-api.com lookups use HTTP only.
       </p>
       <div class="modal-actions">
-        <button type="button" class="btn" data-accept>I understand — continue</button>
+        <button type="button" class="btn primary" data-accept>I understand — continue</button>
       </div>
     </div>
   `;

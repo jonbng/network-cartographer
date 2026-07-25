@@ -2,7 +2,7 @@
   "name": "network-cartographer",
   "private": true,
   "version": "0.1.0",
-  "description": "Desktop app that shows which applications talk to the internet, where they connect, and traceroute paths on a 3D globe",
+  "description": "Map My Network — a local CLI network monitor with a browser-based 3D globe UI",
   "author": "Jonathan Bangert",
   "license": "MIT",
   "repository": {
@@ -14,31 +14,32 @@
   },
   "homepage": "https://github.com/jonbng/network-cartographer#readme",
   "keywords": [
-    "tauri",
+    "cli",
     "network",
     "traceroute",
     "geoip",
-    "desktop",
+    "browser",
     "globe",
     "monitoring",
     "network-cartographer"
   ],
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "npm run build && cargo run --manifest-path server/Cargo.toml --",
+    "start": "npm run dev",
+    "frontend:dev": "vite",
+    "site:dev": "npm --prefix site run dev",
+    "site:build": "npm --prefix site run build",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "check": "tsc --noEmit && cargo check --locked --manifest-path src-tauri/Cargo.toml",
-    "test": "cargo test --locked --manifest-path src-tauri/Cargo.toml"
+    "check": "tsc --noEmit && cargo check --locked --manifest-path server/Cargo.toml",
+    "test": "cargo test --locked --manifest-path server/Cargo.toml"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
     "globe.gl": "^2.46.1",
     "three": "^0.185.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
     "typescript": "^5.8.2",
     "vite": "^6.2.0"
   }

@@ -22,8 +22,8 @@ What you expected to happen.
 **Environment**
 
 - OS and version:
-- Network Cartographer version / commit:
-- How you ran it (`tauri dev`, installed package, with/without sudo):
+- Map My Network version / commit:
+- How you ran it (`npm start`, installed CLI, or release binary):
 
 **Logs / screenshots**
 If relevant, paste console output or attach a screenshot.

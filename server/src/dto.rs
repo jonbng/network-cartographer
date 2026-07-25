@@ -1,0 +1,551 @@
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+use crate::collect::NativeTrafficStatus;
+use crate::geo::{AsnDb, GeoCache, GeoHop, PathGeoCache};
+use crate::model::{display_name_for, AppEntry, AppState, DestStats};
+use crate::trace::{TraceEngine, TraceStatus};
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotDto {
+    pub apps: Vec<AppDto>,
+    pub app_count: usize,
+    pub dest_count: usize,
+    pub live_connections: usize,
+    pub missing_pid: usize,
+    pub attribution: AttributionStatsDto,
+    pub unattributed: Option<TrafficGroupDto>,
+    pub monitoring: MonitoringDto,
+    pub external_only: bool,
+    pub include_udp: bool,
+    pub traces_enabled: bool,
+    pub trace_stats: TraceStatsDto,
+    pub geo_backend: String,
+    pub geo_mmdb: bool,
+    pub geo_asn_mmdb: bool,
+    pub settings: SettingsDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceStatsDto {
+    pub queued: usize,
+    pub running: usize,
+    pub done: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDto {
+    pub id: String,
+    pub name: String,
+    pub path: Option<String>,
+    pub pids: Vec<u32>,
+    pub dest_count: usize,
+    pub hits: u64,
+    pub hits_per_sec: f64,
+    pub activity: f64,
+    pub current_connections: usize,
+    pub new_connections_per_sec: f64,
+    pub traffic: Option<TrafficRateDto>,
+    pub destinations: Vec<DestDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficGroupDto {
+    pub name: String,
+    pub current_connections: usize,
+    pub connections: u64,
+    pub destinations: Vec<DestDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficRateDto {
+    pub rx_bytes_per_sec: f64,
+    pub tx_bytes_per_sec: f64,
+    pub total_bytes_per_sec: f64,
+    pub sample_window_ms: u64,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttributionStatsDto {
+    pub direct: usize,
+    pub recovered: usize,
+    pub unattributed: usize,
+    pub ambiguous: usize,
+    pub owner_gone: usize,
+    pub ratio: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitoringDto {
+    pub mode: String,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DestDto {
+    pub host: String,
+    pub display_host: String,
+    pub ip: String,
+    pub port: u16,
+    pub protocol: String,
+    pub hits: u64,
+    pub last_seen_secs: u64,
+    pub sni: Option<String>,
+    pub asn: Option<u32>,
+    pub org: Option<String>,
+    pub path_changed: bool,
+    pub trace: TraceDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceDto {
+    pub status: String,
+    pub label: String,
+    pub hops: Vec<HopDto>,
+    pub error: Option<String>,
+    pub reached_target: bool,
+    pub target_rtt_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HopDto {
+    pub ttl: u8,
+    pub addr: Option<String>,
+    pub rtt_ms: Option<f64>,
+    pub hostname: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub geo_source: Option<String>,
+    pub geo_confidence: Option<f64>,
+    pub geo_note: Option<String>,
+    pub asn: Option<u32>,
+    pub org: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SettingsDto {
+    pub external_only: bool,
+    pub include_udp: bool,
+    pub traces_enabled: bool,
+    pub poll_interval_ms: u64,
+    pub geo_local_only: bool,
+    pub show_low_confidence: bool,
+    pub confidence_min: f64,
+    pub globe_density: String,
+    pub capture_sni: bool,
+    pub history_enabled: bool,
+    pub enhanced_monitoring: bool,
+    /// User accepted first-run privacy notice (GeoIP / local monitoring).
+    pub privacy_accepted: bool,
+}
+
+impl Default for SettingsDto {
+    fn default() -> Self {
+        Self {
+            external_only: true,
+            include_udp: false,
+            traces_enabled: true,
+            poll_interval_ms: 1000,
+            geo_local_only: false,
+            show_low_confidence: true,
+            confidence_min: 0.45,
+            globe_density: "all".into(),
+            capture_sni: false,
+            history_enabled: false,
+            enhanced_monitoring: false,
+            privacy_accepted: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathChangedEvent {
+    pub app: String,
+    pub host: String,
+    pub ip: String,
+    pub summary: String,
+}
+
+struct DtoContext<'a> {
+    traces: &'a TraceEngine,
+    geo: &'a GeoCache,
+    path_geo: &'a PathGeoCache,
+    asn: &'a AsnDb,
+    settings: &'a SettingsDto,
+    path_changed: &'a std::collections::HashSet<String>,
+}
+
+pub fn build_snapshot(
+    state: &AppState,
+    traces: &TraceEngine,
+    geo: &GeoCache,
+    path_geo: &PathGeoCache,
+    asn: &AsnDb,
+    settings: &SettingsDto,
+    path_changed: &std::collections::HashSet<String>,
+    traffic_status: &NativeTrafficStatus,
+) -> SnapshotDto {
+    let ts = traces.stats();
+    let context = DtoContext {
+        traces,
+        geo,
+        path_geo,
+        asn,
+        settings,
+        path_changed,
+    };
+    let apps: Vec<AppDto> = state
+        .sorted_apps()
+        .into_iter()
+        .map(|app| app_to_dto(app, &context))
+        .collect();
+    let attributed = state.attribution.direct + state.attribution.recovered;
+    let total = attributed + state.attribution.unattributed;
+    let unattributed = state.unattributed();
+    let unattributed = if unattributed.destinations.is_empty() {
+        None
+    } else {
+        Some(TrafficGroupDto {
+            name: "Unattributed traffic".into(),
+            current_connections: unattributed.current_connections,
+            connections: unattributed.connection_hits(),
+            destinations: unattributed
+                .sorted_destinations()
+                .into_iter()
+                .map(|dest| dest_to_dto(unattributed, dest, &context))
+                .collect(),
+        })
+    };
+
+    SnapshotDto {
+        app_count: state.app_count(),
+        dest_count: state.total_destinations(),
+        live_connections: state.last_raw_connections,
+        missing_pid: state.missing_pid_count,
+        attribution: AttributionStatsDto {
+            direct: state.attribution.direct,
+            recovered: state.attribution.recovered,
+            unattributed: state.attribution.unattributed,
+            ambiguous: state.attribution.ambiguous,
+            owner_gone: state.attribution.owner_gone,
+            ratio: if total == 0 {
+                1.0
+            } else {
+                attributed as f64 / total as f64
+            },
+        },
+        unattributed,
+        monitoring: monitoring_to_dto(traffic_status),
+        external_only: state.external_only,
+        include_udp: state.include_udp,
+        traces_enabled: traces.enabled(),
+        trace_stats: TraceStatsDto {
+            queued: ts.queued,
+            running: ts.running,
+            done: ts.done,
+            failed: ts.failed,
+        },
+        apps,
+        geo_backend: geo.backend_label(settings.geo_local_only, asn.loaded()),
+        geo_mmdb: geo.mmdb_loaded(),
+        geo_asn_mmdb: asn.loaded(),
+        settings: settings.clone(),
+    }
+}
+
+fn app_to_dto(app: &AppEntry, context: &DtoContext<'_>) -> AppDto {
+    let destinations: Vec<DestDto> = app
+        .sorted_destinations()
+        .into_iter()
+        .map(|d| dest_to_dto(app, d, context))
+        .collect();
+
+    let name = display_name_for(app);
+    let id = app
+        .path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| app.name.clone());
+
+    AppDto {
+        id,
+        name,
+        path: app.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        pids: app.pids.iter().copied().collect(),
+        dest_count: app.destinations.len(),
+        hits: app.connection_hits(),
+        hits_per_sec: app.hits_per_sec,
+        activity: app
+            .traffic
+            .map(|traffic| traffic.total_bytes_per_sec())
+            .unwrap_or(app.hits_per_sec),
+        current_connections: app.current_connections,
+        new_connections_per_sec: app.hits_per_sec,
+        traffic: app.traffic.map(|traffic| TrafficRateDto {
+            rx_bytes_per_sec: traffic.rx_bytes_per_sec,
+            tx_bytes_per_sec: traffic.tx_bytes_per_sec,
+            total_bytes_per_sec: traffic.total_bytes_per_sec(),
+            sample_window_ms: traffic.sample_window_ms,
+            source: if cfg!(target_os = "linux") {
+                "linux-sock-diag".into()
+            } else {
+                "native".into()
+            },
+        }),
+        destinations,
+    }
+}
+
+fn monitoring_to_dto(status: &NativeTrafficStatus) -> MonitoringDto {
+    match status {
+        NativeTrafficStatus::Disabled => MonitoringDto {
+            mode: "portable".into(),
+            status: "ready".into(),
+            message: "Portable socket attribution".into(),
+        },
+        NativeTrafficStatus::Available => MonitoringDto {
+            mode: "native".into(),
+            status: "ready".into(),
+            message: if cfg!(target_os = "linux") {
+                "Linux TCP socket byte counters".into()
+            } else {
+                "Native byte counters".into()
+            },
+        },
+        NativeTrafficStatus::Unavailable(message) => MonitoringDto {
+            mode: "portable".into(),
+            status: "unavailable".into(),
+            message: message.clone(),
+        },
+    }
+}
+
+fn dest_to_dto(app: &AppEntry, d: &DestStats, context: &DtoContext<'_>) -> DestDto {
+    let status = context.traces.get(d.remote.ip());
+    let ip = d.remote.ip();
+    let asn_info = context.asn.lookup(ip);
+    let display_host = display_host_for(d);
+    let change_key = format!("{}|{}", display_name_for(app), ip);
+    DestDto {
+        host: d.display_host(),
+        display_host,
+        ip: ip.to_string(),
+        port: d.remote.port(),
+        protocol: d.protocol.as_str().to_string(),
+        hits: d.hit_count,
+        last_seen_secs: d.last_seen.elapsed().as_secs(),
+        sni: d.sni.clone(),
+        asn: asn_info.as_ref().map(|a| a.asn),
+        org: asn_info.map(|a| a.org),
+        path_changed: context.path_changed.contains(&change_key),
+        trace: trace_to_dto(
+            status,
+            context.geo,
+            context.path_geo,
+            context.asn,
+            context.settings,
+        ),
+    }
+}
+
+fn display_host_for(d: &DestStats) -> String {
+    if let Some(sni) = &d.sni {
+        if !sni.is_empty() {
+            return sni.clone();
+        }
+    }
+    if let Some(h) = &d.hostname {
+        if !h.is_empty() {
+            return h.clone();
+        }
+    }
+    d.remote.ip().to_string()
+}
+
+fn trace_to_dto(
+    status: TraceStatus,
+    geo: &GeoCache,
+    path_geo: &PathGeoCache,
+    asn: &AsnDb,
+    settings: &SettingsDto,
+) -> TraceDto {
+    match status {
+        TraceStatus::Idle => TraceDto {
+            status: "idle".into(),
+            label: "·".into(),
+            hops: vec![],
+            error: None,
+            reached_target: false,
+            target_rtt_ms: None,
+        },
+        TraceStatus::Queued => TraceDto {
+            status: "queued".into(),
+            label: "queued".into(),
+            hops: vec![],
+            error: None,
+            reached_target: false,
+            target_rtt_ms: None,
+        },
+        TraceStatus::Running => TraceDto {
+            status: "running".into(),
+            label: "tracing…".into(),
+            hops: vec![],
+            error: None,
+            reached_target: false,
+            target_rtt_ms: None,
+        },
+        TraceStatus::Failed { message, .. } => TraceDto {
+            status: "failed".into(),
+            label: format!("fail:{message}"),
+            hops: vec![],
+            error: Some(message),
+            reached_target: false,
+            target_rtt_ms: None,
+        },
+        TraceStatus::Done(r) => {
+            let reached_target = r.reached_target();
+            let target_rtt_ms = r.target_rtt_ms();
+            let label = match (reached_target, target_rtt_ms, r.final_rtt_ms()) {
+                (true, Some(ms), _) => format!("hops {}  {:.0}ms", r.hop_count(), ms),
+                (true, None, _) => format!("hops {}  target reached", r.hop_count()),
+                (false, _, Some(ms)) => format!("partial  last reply {:.0}ms", ms),
+                (false, _, None) => "partial trace".into(),
+            };
+            let geo_hops = path_geo.get_or_compute(&r.hops, geo);
+            let hops = geo_hops
+                .into_iter()
+                .filter_map(|h| geo_hop_to_dto(h, asn, settings))
+                .collect();
+            TraceDto {
+                status: if r.hops.is_empty() {
+                    "failed".into()
+                } else {
+                    "done".into()
+                },
+                label,
+                hops,
+                error: r.error.clone(),
+                reached_target,
+                target_rtt_ms,
+            }
+        }
+    }
+}
+
+fn geo_hop_to_dto(h: GeoHop, asn: &AsnDb, settings: &SettingsDto) -> Option<HopDto> {
+    // Confidence filter for plotted hops: still include hop without coords if unmapped
+    if let Some(ref g) = h.geo {
+        if !settings.show_low_confidence && g.confidence < settings.confidence_min {
+            // strip geo but keep hop for list
+            let ip = h.addr.as_ref().and_then(|a| a.parse().ok());
+            let a = ip.and_then(|ip| asn.lookup(ip));
+            return Some(HopDto {
+                ttl: h.ttl,
+                addr: h.addr,
+                rtt_ms: h.rtt_ms,
+                hostname: h.hostname,
+                lat: None,
+                lon: None,
+                city: None,
+                country: None,
+                geo_source: Some(g.source.clone()),
+                geo_confidence: Some(g.confidence),
+                geo_note: Some("below confidence threshold".into()),
+                asn: a.as_ref().map(|x| x.asn),
+                org: a.map(|x| x.org),
+            });
+        }
+    }
+
+    let ip = h.addr.as_ref().and_then(|a| a.parse().ok());
+    let a = ip.and_then(|ip| asn.lookup(ip));
+    Some(HopDto {
+        ttl: h.ttl,
+        addr: h.addr,
+        rtt_ms: h.rtt_ms,
+        hostname: h.hostname,
+        lat: h.geo.as_ref().map(|g| g.lat),
+        lon: h.geo.as_ref().map(|g| g.lon),
+        city: h.geo.as_ref().map(|g| g.city.clone()),
+        country: h.geo.as_ref().map(|g| g.country.clone()),
+        geo_source: h.geo.as_ref().map(|g| g.source.clone()),
+        geo_confidence: h.geo.as_ref().map(|g| g.confidence),
+        geo_note: h.note,
+        asn: a.as_ref().map(|x| x.asn),
+        org: a.map(|x| x.org),
+    })
+}
+
+#[allow(dead_code)]
+pub fn format_age(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 2 {
+        "now".into()
+    } else if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m", secs / 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_deserialize_partial_json() {
+        // Frontend may omit newer fields; serde default fills them.
+        let raw = r#"{"externalOnly":false,"includeUdp":true,"tracesEnabled":true,"pollIntervalMs":2000}"#;
+        let s: SettingsDto = serde_json::from_str(raw).expect("partial settings");
+        assert!(!s.external_only);
+        assert!(s.include_udp);
+        assert_eq!(s.poll_interval_ms, 2000);
+        assert!(!s.privacy_accepted);
+        assert_eq!(s.globe_density, "all");
+    }
+
+    #[test]
+    fn settings_roundtrip_privacy() {
+        let s = SettingsDto {
+            privacy_accepted: true,
+            ..SettingsDto::default()
+        };
+        let raw = serde_json::to_string(&s).unwrap();
+        let back: SettingsDto = serde_json::from_str(&raw).unwrap();
+        assert!(back.privacy_accepted);
+    }
+
+    #[test]
+    fn trace_accuracy_fields_use_frontend_names() {
+        let trace = TraceDto {
+            status: "done".into(),
+            label: "hops 4  12ms".into(),
+            hops: vec![],
+            error: None,
+            reached_target: true,
+            target_rtt_ms: Some(12.0),
+        };
+        let value = serde_json::to_value(trace).unwrap();
+        assert_eq!(value["reachedTarget"], true);
+        assert_eq!(value["targetRttMs"], 12.0);
+        assert!(value.get("reached_target").is_none());
+    }
+}

@@ -25,8 +25,9 @@ export default defineConfig({
           port: 1421,
         }
       : undefined,
-    watch: {
-      ignored: ["**/src-tauri/**"],
+    proxy: {
+      "/api": "http://127.0.0.1:4769",
     },
+    watch: { ignored: ["**/server/**"] },
   },
 });

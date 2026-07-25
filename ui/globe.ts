@@ -12,6 +12,8 @@ export type GlobeHop = {
   geoSource?: string | null;
   geoConfidence?: number | null;
   geoNote?: string | null;
+  asn?: number | null;
+  org?: string | null;
 };
 
 export type GlobePath = {
@@ -26,9 +28,13 @@ export type GlobePath = {
   hops: GlobeHop[];
   status: string;
   rttMs: number | null;
+  reachedTarget: boolean;
+  targetRttMs: number | null;
+  error?: string | null;
 };
 
-type PathThrough = {
+export type HopRouteChoice = {
+  pathId: string;
   app: string;
   host: string;
   ip: string;
@@ -39,6 +45,34 @@ type PathThrough = {
   isDestination: boolean;
 };
 
+export type HopSelection = {
+  lat: number;
+  lon: number;
+  city: string | null;
+  country: string | null;
+  addr: string | null;
+  hostname: string | null;
+  asn: number | null;
+  org: string | null;
+  geoSource: string | null;
+  geoConfidence: number | null;
+  geoNote: string | null;
+  routes: HopRouteChoice[];
+};
+
+type PathThrough = {
+  pathId: string;
+  app: string;
+  host: string;
+  ip: string;
+  port: number;
+  color: string;
+  ttl: number;
+  rttMs: number | null;
+  isDestination: boolean;
+  isLastMapped: boolean;
+};
+
 type Point = {
   lat: number;
   lng: number;
@@ -46,12 +80,18 @@ type Point = {
   size: number;
   color: string;
   isDestination: boolean;
+  isLastMapped: boolean;
   city: string | null;
   country: string | null;
   addr: string | null;
   hostname: string | null;
   through: PathThrough[];
   dimmed: boolean;
+  asn: number | null;
+  org: string | null;
+  geoSource: string | null;
+  geoConfidence: number | null;
+  geoNote: string | null;
 };
 
 type Arc = {
@@ -65,6 +105,7 @@ type Arc = {
   host: string;
   dimmed: boolean;
   stroke: number;
+  uncertain: boolean;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -72,13 +113,14 @@ let globe: any = null;
 let lastKey = "";
 let showLabels = true;
 let focusedApps: Set<string> = new Set();
+let selectedPathId: string | null = null;
 let density: "all" | "destinations" | "hubs" = "all";
 let hasUserMovedCamera = false;
 let lastFrameBounds: string | null = null;
-let onHopClick: ((apps: string[], hosts: string[]) => void) | null = null;
+let onHopClick: ((selection: HopSelection) => void) | null = null;
 
 const PALETTE = [
-  "#22d3ee",
+  "#5eead4",
   "#a78bfa",
   "#34d399",
   "#f472b6",
@@ -120,6 +162,12 @@ export function setFocusedApps(apps: string[]) {
   lastKey = "";
 }
 
+export function setSelectedPath(pathId: string | null) {
+  if (selectedPathId === pathId) return;
+  selectedPathId = pathId;
+  lastKey = "";
+}
+
 export function getFocusedApp(): string | null {
   if (focusedApps.size === 1) return [...focusedApps][0];
   return null;
@@ -135,7 +183,7 @@ export function setDensity(mode: "all" | "destinations" | "hubs") {
 }
 
 export function setHopClickHandler(
-  fn: ((apps: string[], hosts: string[]) => void) | null,
+  fn: ((selection: HopSelection) => void) | null,
 ) {
   onHopClick = fn;
 }
@@ -143,13 +191,13 @@ export function setHopClickHandler(
 export function initGlobe(container: HTMLElement) {
   if (globe) return globe;
 
-  // Keep browser / Tauri page zoom off the webview chrome
+  // Keep browser page zoom off the globe interaction surface.
   preventPageZoom(container);
 
   globe = new Globe(container)
     .backgroundColor("rgba(0,0,0,0)")
     .showAtmosphere(true)
-    .atmosphereColor("#22d3ee")
+    .atmosphereColor("#5eead4")
     .atmosphereAltitude(0.2)
     .globeImageUrl("/earth-dark.jpg")
     .pointAltitude((d: object) => ((d as Point).isDestination ? 0.018 : 0.008))
@@ -159,9 +207,21 @@ export function initGlobe(container: HTMLElement) {
     .pointLabel((d: object) => hopTooltip(d as Point))
     .onPointClick((d: object) => {
       const p = d as Point;
-      const apps = [...new Set(p.through.map((t) => t.app))];
-      const hosts = [...new Set(p.through.map((t) => t.host))];
-      onHopClick?.(apps, hosts);
+      const routes = [...new Map(p.through.map((route) => [route.pathId, route])).values()];
+      onHopClick?.({
+        lat: p.lat,
+        lon: p.lng,
+        city: p.city,
+        country: p.country,
+        addr: p.addr,
+        hostname: p.hostname,
+        asn: p.asn,
+        org: p.org,
+        geoSource: p.geoSource,
+        geoConfidence: p.geoConfidence,
+        geoNote: p.geoNote,
+        routes,
+      });
     })
     .arcColor((d: object) => {
       const a = d as Arc;
@@ -170,9 +230,9 @@ export function initGlobe(container: HTMLElement) {
     })
     .arcStroke((d: object) => (d as Arc).stroke)
     .arcAltitudeAutoScale(0.26)
-    .arcDashLength(0.35)
-    .arcDashGap(0.22)
-    .arcDashAnimateTime(2800)
+    .arcDashLength((d: object) => ((d as Arc).uncertain ? 0.18 : 1))
+    .arcDashGap((d: object) => ((d as Arc).uncertain ? 0.18 : 0))
+    .arcDashAnimateTime((d: object) => ((d as Arc).uncertain ? 2800 : 0))
     .arcsTransitionDuration(0)
     .pointsTransitionDuration(0)
     .labelsTransitionDuration(0);
@@ -264,7 +324,9 @@ function hopTooltip(p: Point): string {
     : "Unknown location";
   const kind = p.isDestination
     ? `<span style="color:#f9a8d4;font-weight:700">★ Final destination</span>`
-    : `<span style="color:#94a3b8">Transit hop</span>`;
+    : p.isLastMapped
+      ? `<span style="color:#f2c66d;font-weight:700">◌ Last mapped hop · target not confirmed</span>`
+    : `<span style="color:#94a3b8">Observed network hop</span>`;
 
   const apps = new Map<string, PathThrough[]>();
   for (const t of p.through) {
@@ -275,7 +337,7 @@ function hopTooltip(p: Point): string {
 
   const appBlocks: string[] = [];
   for (const [app, routes] of apps) {
-    const color = routes[0]?.color ?? "#22d3ee";
+    const color = routes[0]?.color ?? "#5eead4";
     const destLines = routes
       .slice(0, 8)
       .map((r) => {
@@ -299,21 +361,27 @@ function hopTooltip(p: Point): string {
       </div>`);
   }
 
-  const conf =
-    p.through.length > 0
-      ? ""
-      : "";
   const addr = p.hostname || p.addr || "";
   const addrLine = addr
     ? `<div style="opacity:0.7;font-family:ui-monospace,monospace;font-size:11px;margin-top:2px">${escapeHtml(addr)}</div>`
+    : "";
+  const network = p.org
+    ? `<div style="opacity:0.78;margin-top:3px">${escapeHtml(p.org)}${p.asn ? ` · AS${p.asn}` : ""}</div>`
+    : "";
+  const confidence = confidenceLabel(p.geoConfidence);
+  const evidence = p.geoSource
+    ? `<div style="opacity:0.62;margin-top:3px">Location: ${escapeHtml(sourceLabel(p.geoSource))}${confidence ? ` · ${confidence} confidence` : ""}</div>`
+    : "";
+  const note = p.geoNote
+    ? `<div style="color:#f2c66d;opacity:0.78;margin-top:3px">${escapeHtml(p.geoNote)}</div>`
     : "";
 
   return `<div style="font-family:system-ui;font-size:12px;line-height:1.4;padding:4px 2px;max-width:280px">
     <div>${kind}</div>
     <div style="margin-top:4px;font-weight:600">${escapeHtml(city)}</div>
-    ${addrLine}${conf}
+    ${addrLine}${network}${evidence}${note}
     <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.12);font-size:11px;opacity:0.7">
-      Apps through this node · click to open sidebar
+      Network topology, not a physical cable path · click to inspect
     </div>
     ${appBlocks.join("") || `<div style="opacity:0.6;margin-top:4px">No path data</div>`}
   </div>`;
@@ -340,14 +408,14 @@ export function prettyHost(host: string): string {
 
 function geometryKey(paths: GlobePath[]): string {
   const focus = [...focusedApps].sort().join(",");
-  let s = `${showLabels ? 1 : 0}|${focus}|${density}|`;
+  let s = `${showLabels ? 1 : 0}|${focus}|${selectedPathId ?? ""}|${density}|`;
   for (const p of paths) {
-    s += p.id;
+    s += `${p.id}:${p.reachedTarget ? 1 : 0}`;
     for (const h of p.hops) {
       if (h.lat == null || h.lon == null) continue;
       // city name matters for labels but only once geocoded
       const cityBit = h.city ? h.city.slice(0, 12) : "";
-      s += `${h.ttl}@${h.lat.toFixed(2)},${h.lon.toFixed(2)}:${cityBit};`;
+      s += `${h.ttl}@${h.lat.toFixed(2)},${h.lon.toFixed(2)}:${cityBit}:${(h.geoConfidence ?? 0).toFixed(2)};`;
     }
     s += "|";
   }
@@ -367,7 +435,9 @@ export function updateAllPaths(paths: GlobePath[]): {
   for (const p of paths) {
     const n = p.hops.filter((h) => h.lat != null).length;
     hopCount += n;
-    if (n > 0) destCount += 1;
+    if (p.reachedTarget && p.hops.some((h) => h.addr === p.ip && h.lat != null)) {
+      destCount += 1;
+    }
   }
 
   const key = geometryKey(paths);
@@ -382,7 +452,9 @@ export function updateAllPaths(paths: GlobePath[]): {
   const allLngs: number[] = [];
 
   for (const path of paths) {
-    const dimmed = focusedApps.size > 0 && !focusedApps.has(path.app);
+    const dimmed = selectedPathId
+      ? path.id !== selectedPathId
+      : focusedApps.size > 0 && !focusedApps.has(path.app);
     const located = path.hops.filter(
       (h) =>
         h.lat != null &&
@@ -401,10 +473,12 @@ export function updateAllPaths(paths: GlobePath[]): {
         : located;
 
     located.forEach((h, i) => {
-      const isEnd = i === located.length - 1;
-      if (density === "destinations" && !isEnd) return;
+      const isEnd = path.reachedTarget && h.addr === path.ip;
+      const isLastMapped = i === located.length - 1;
+      if (density === "destinations" && !isEnd && !isLastMapped) return;
       const nkey = locKey(h.lat as number, h.lon as number);
       const through: PathThrough = {
+        pathId: path.id,
         app: path.app,
         host: path.host,
         ip: path.ip,
@@ -413,6 +487,7 @@ export function updateAllPaths(paths: GlobePath[]): {
         ttl: h.ttl,
         rttMs: h.rttMs,
         isDestination: isEnd,
+        isLastMapped,
       };
 
       allLats.push(h.lat as number);
@@ -420,6 +495,7 @@ export function updateAllPaths(paths: GlobePath[]): {
 
       const existing = nodeMap.get(nkey);
       if (existing) {
+        const sameAddress = existing.addr === h.addr;
         existing.through.push(through);
         if (isEnd) {
           existing.isDestination = true;
@@ -428,6 +504,11 @@ export function updateAllPaths(paths: GlobePath[]): {
             existing.color = "#f9a8d4";
             existing.label = labelForDestination(path, h);
           }
+        }
+        if (isLastMapped && !path.reachedTarget && !existing.isDestination) {
+          existing.isLastMapped = true;
+          existing.size = Math.max(existing.size, 0.3);
+          if (!dimmed) existing.color = "#f2c66d";
         }
         if (!dimmed) existing.dimmed = false;
         if (!existing.isDestination && !dimmed) {
@@ -440,6 +521,19 @@ export function updateAllPaths(paths: GlobePath[]): {
           if (!existing.isDestination) {
             existing.label = h.city;
           }
+        }
+        if ((h.geoConfidence ?? -1) > (existing.geoConfidence ?? -1)) {
+          existing.geoSource = h.geoSource ?? existing.geoSource;
+          existing.geoConfidence = h.geoConfidence ?? existing.geoConfidence;
+          existing.geoNote = h.geoNote ?? existing.geoNote;
+        }
+        // Several IPs can collapse onto the same city coordinate. Do not show
+        // one route's address or owner as though it described the whole point.
+        if (!sameAddress) {
+          existing.addr = null;
+          existing.hostname = null;
+          existing.asn = null;
+          existing.org = null;
         }
       } else {
         nodeMap.set(nkey, {
@@ -455,12 +549,18 @@ export function updateAllPaths(paths: GlobePath[]): {
               ? "#f9a8d4"
               : path.color,
           isDestination: isEnd,
+          isLastMapped: isLastMapped && !path.reachedTarget,
           city: h.city,
           country: h.country,
           addr: h.addr,
           hostname: h.hostname ?? null,
           through: [through],
           dimmed,
+          asn: h.asn ?? null,
+          org: h.org ?? null,
+          geoSource: h.geoSource ?? null,
+          geoConfidence: h.geoConfidence ?? null,
+          geoNote: h.geoNote ?? null,
         });
       }
     });
@@ -469,6 +569,8 @@ export function updateAllPaths(paths: GlobePath[]): {
       const a = arcHops[i];
       const b = arcHops[i + 1];
       const isLastArc = i === arcHops.length - 2;
+      const bIsTarget = path.reachedTarget && b.addr === path.ip;
+      const uncertain = hasUnmappedGap(path.hops, a.ttl, b.ttl);
       arcs.push({
         startLat: a.lat as number,
         startLng: a.lon as number,
@@ -476,14 +578,15 @@ export function updateAllPaths(paths: GlobePath[]): {
         endLng: b.lon as number,
         color: dimmed
           ? ["rgba(100,120,140,0.08)", "rgba(100,120,140,0.04)"]
-          : isLastArc
+          : bIsTarget
             ? [path.color, "#f9a8d4"]
             : [path.color, lighten(path.color, 0.15)],
         pathId: path.id,
         app: path.app,
         host: path.host,
         dimmed,
-        stroke: dimmed ? 0.12 : isLastArc ? 0.55 : 0.35,
+        stroke: dimmed ? 0.12 : bIsTarget ? 0.55 : isLastArc ? 0.42 : 0.35,
+        uncertain,
       });
     }
   }
@@ -491,19 +594,35 @@ export function updateAllPaths(paths: GlobePath[]): {
   let points = [...nodeMap.values()].map((p) => {
     if (p.dimmed) return { ...p, color: "rgba(120,140,160,0.2)" };
     if (p.isDestination) {
-      return { ...p, color: "#f9a8d4", size: Math.max(p.size, 0.5) };
+      const alpha = confidenceAlpha(p.geoConfidence);
+      return {
+        ...p,
+        color: withAlpha("#f9a8d4", alpha),
+        size: Math.max(p.size, 0.5),
+      };
+    }
+    if (p.isLastMapped) {
+      const alpha = confidenceAlpha(p.geoConfidence);
+      return {
+        ...p,
+        color: withAlpha("#f2c66d", alpha),
+        size: Math.max(p.size, 0.3),
+      };
     }
     const uniqueApps = new Set(p.through.map((t) => t.app));
     if (uniqueApps.size > 1) {
       return { ...p, color: "#cbd5e1", size: Math.max(p.size, 0.24) };
     }
-    return p;
+    const alpha = confidenceAlpha(p.geoConfidence);
+    return alpha < 1 ? { ...p, color: withAlpha(p.color, alpha) } : p;
   });
 
   if (density === "hubs") {
     points = points.filter(
       (p) =>
-        p.isDestination || new Set(p.through.map((t) => t.app)).size > 1,
+        p.isDestination ||
+        p.isLastMapped ||
+        new Set(p.through.map((t) => t.app)).size > 1,
     );
   }
 
@@ -518,15 +637,18 @@ export function updateAllPaths(paths: GlobePath[]): {
       .labelLat("lat")
       .labelLng("lng")
       .labelText("label")
-      .labelSize((d: object) => ((d as Point).isDestination ? 1.05 : 0.75))
+      // Globe labels use angular units, so values around 1 become enormous
+      // when the camera frames a dense metro area. Keep them secondary to
+      // the nodes and routes they describe.
+      .labelSize((d: object) => ((d as Point).isDestination ? 0.48 : 0.34))
       .labelDotRadius(0)
       .labelColor((d: object) =>
         (d as Point).isDestination
-          ? "rgba(249,168,212,0.92)"
-          : "rgba(226,232,240,0.7)",
+          ? "rgba(249,168,212,0.84)"
+          : "rgba(226,232,240,0.58)",
       )
-      .labelAltitude(0.015)
-      .labelResolution(2);
+      .labelAltitude(0.018)
+      .labelResolution(3);
   } else {
     globe.labelsData([]);
   }
@@ -546,53 +668,135 @@ function labelForDestination(path: GlobePath, hop: GlobeHop): string {
   return host.length > 18 ? host.slice(0, 16) + "…" : host;
 }
 
+function hasUnmappedGap(hops: GlobeHop[], fromTtl: number, toTtl: number): boolean {
+  if (toTtl - fromTtl > 1) return true;
+  return hops.some(
+    (hop) =>
+      hop.ttl > fromTtl &&
+      hop.ttl < toTtl &&
+      (hop.lat == null || hop.lon == null),
+  );
+}
+
+function confidenceLabel(score: number | null): string {
+  if (score == null) return "";
+  if (score >= 0.75) return "high";
+  if (score >= 0.55) return "medium";
+  return "low";
+}
+
+function confidenceAlpha(score: number | null): number {
+  if (score == null || score >= 0.75) return 1;
+  return score >= 0.55 ? 0.78 : 0.55;
+}
+
+function sourceLabel(source: string): string {
+  if (source === "mmdb") return "local MaxMind database";
+  if (source === "geoip" || source === "ipwho") return "online GeoIP";
+  if (source.startsWith("rdns")) return "reverse DNS hint";
+  if (source.startsWith("inferred")) return "route and latency inference";
+  return source;
+}
+
+function withAlpha(color: string, alpha: number): string {
+  const hex = color.replace("#", "");
+  if (!/^[0-9a-f]{6}$/i.test(hex)) return color;
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
 function locKey(lat: number, lon: number): string {
   return `${lat.toFixed(2)},${lon.toFixed(2)}`;
 }
 
 function pickLabels(points: Point[]): Point[] {
-  // Very sparse: destinations with a clean label, plus a handful of real cities
-  const out: Point[] = [];
-  const seen = new Set<string>();
+  // Labels are decoration; nodes remain visible, hoverable, and clickable.
+  // Rank useful candidates, then reserve geographic space for each accepted
+  // label. This handles both duplicate city names and different names inside
+  // one metro area (for example São Paulo + Guarulhos).
+  const maxLabels = points.length > 80 ? 10 : points.length > 35 ? 12 : 16;
+  const maxTransitLabels = 4;
+  const bestByName = new Map<string, Point>();
 
-  const dests = points
-    .filter((p) => p.isDestination && !p.dimmed && p.label && !isNoisyLabel(p.label))
-    .sort((a, b) => b.through.length - a.through.length);
+  for (const point of points) {
+    if (point.dimmed) continue;
 
-  for (const p of dests) {
-    const k = (p.city || p.label).toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(p);
-    if (out.length >= 14) break;
-  }
+    const label = point.isDestination ? point.label : point.city || "";
+    if (!label || isNoisyLabel(label)) continue;
 
-  // A few named transit cities (never hostnames/IPs)
-  if (out.length < 18) {
-    const cities = points
-      .filter(
-        (p) =>
-          !p.isDestination &&
-          !p.dimmed &&
-          p.city &&
-          !isNoisyLabel(p.city),
-      )
-      .sort(
-        (a, b) =>
-          new Set(b.through.map((t) => t.app)).size -
-          new Set(a.through.map((t) => t.app)).size,
-      );
-
-    for (const p of cities) {
-      const k = p.city!.toLowerCase();
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push({ ...p, label: p.city! });
-      if (out.length >= 18) break;
+    const candidate = label === point.label ? point : { ...point, label };
+    const key = normalizeLabel(label);
+    const existing = bestByName.get(key);
+    if (!existing || labelPriority(candidate) > labelPriority(existing)) {
+      bestByName.set(key, candidate);
     }
   }
 
-  return out;
+  const candidates = [...bestByName.values()].sort(
+    (a, b) => labelPriority(b) - labelPriority(a),
+  );
+  const accepted: Point[] = [];
+  let transitLabels = 0;
+
+  for (const candidate of candidates) {
+    if (!candidate.isDestination && transitLabels >= maxTransitLabels) continue;
+    if (accepted.some((placed) => labelsCollide(candidate, placed))) continue;
+
+    accepted.push(candidate);
+    if (!candidate.isDestination) transitLabels += 1;
+    if (accepted.length >= maxLabels) break;
+  }
+
+  return accepted;
+}
+
+function labelPriority(point: Point): number {
+  const appCount = new Set(point.through.map((route) => route.app)).size;
+  const destinationRoutes = point.through.filter(
+    (route) => route.isDestination,
+  ).length;
+  // Destinations win, then shared network hubs, then route volume. Prefer a
+  // concise name in a tie because it occupies less map space.
+  return (
+    (point.isDestination ? 10_000 : 0) +
+    destinationRoutes * 100 +
+    appCount * 20 +
+    point.through.length -
+    point.label.length * 0.05
+  );
+}
+
+function normalizeLabel(label: string): string {
+  return label
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function labelsCollide(a: Point, b: Point): boolean {
+  // Approximate each label's footprint in angular map space. Longitude
+  // degrees contract toward the poles, hence the cosine correction.
+  const midLat = ((a.lat + b.lat) / 2) * (Math.PI / 180);
+  const dx =
+    Math.abs(wrappedLongitudeDelta(a.lng, b.lng)) *
+    Math.max(0.28, Math.cos(midLat));
+  const dy = Math.abs(a.lat - b.lat);
+  const halfWidth =
+    (labelAngularWidth(a.label) + labelAngularWidth(b.label)) / 2;
+
+  return dx < halfWidth + 1.2 && dy < 2.6;
+}
+
+function labelAngularWidth(label: string): number {
+  return Math.min(9, Math.max(3, label.length * 0.34 + 1.4));
+}
+
+function wrappedLongitudeDelta(a: number, b: number): number {
+  const direct = Math.abs(a - b) % 360;
+  return Math.min(direct, 360 - direct);
 }
 
 function isNoisyLabel(s: string): boolean {

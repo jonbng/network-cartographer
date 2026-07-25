@@ -9,18 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Desktop app (Tauri 2) with live per-app TCP connection monitoring
+- Local CLI with a browser-based globe and live per-app TCP connection monitoring
 - Automatic traceroute queue with per-OS probe methods (Linux / macOS / Windows)
 - Hop geolocation via rDNS / IATA, optional MaxMind GeoLite2, and online fallbacks
 - 3D globe path visualization (globe.gl / Three.js)
 - First-run privacy notice and in-app About / privacy summary
-- System tray with live tooltip
+- Loopback-only HTTP API with live Server-Sent Events
+- One-command launchers backed by prebuilt cross-platform release binaries
 - Settings persistence (external-only, traces, local geo, history, density)
-- GitHub Actions CI (frontend + multi-OS Rust) and release workflow for installers
+- GitHub Actions CI (frontend + multi-OS Rust) and release workflow for CLI binaries
+- Attribution-quality statistics and a separate Unattributed traffic section
+- Opt-in Linux per-application upload/download rates using unprivileged kernel socket diagnostics
+
+### Fixed
+
+- Preserve exact socket ownership while TCP connections transition through teardown states
+- Count each socket once instead of treating every polling observation as another request
+- Avoid merging every PID-less connection into a misleading `unknown` application
 
 ### Notes
 
 - Free ip-api.com batch lookups are HTTP-only; prefer a local GeoLite2 MMDB
-- Unsigned builds may trigger OS trust warnings until code signing is configured
+- The CLI uses normal-user traceroute modes and never requests additional permissions
 
 [0.1.0]: https://github.com/jonbng/network-cartographer/releases/tag/v0.1.0

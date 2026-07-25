@@ -11,3 +11,4 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 ratatui = "0.29"
 base64 = "0.22"
 anyhow = "1"
+network-cartographer-backend = { package = "network-cartographer", path = "../../server" }

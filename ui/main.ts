@@ -1,6 +1,4 @@
-import { getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { getVersion, invoke, listen } from "./api";
 import {
   clearGlobe,
   colorForKey,
@@ -10,10 +8,13 @@ import {
   setFocusedApps,
   setHopClickHandler,
   setLabelsVisible,
+  setSelectedPath,
   updateAllPaths,
   type GlobePath,
+  type HopSelection,
 } from "./globe";
 import { mountOnboarding } from "./onboarding";
+import { RouteInspector } from "./route-inspector";
 
 type HopDto = {
   ttl: number;
@@ -36,6 +37,8 @@ type TraceDto = {
   label: string;
   hops: HopDto[];
   error: string | null;
+  reachedTarget: boolean;
+  targetRttMs: number | null;
 };
 
 type DestDto = {
@@ -62,6 +65,24 @@ type AppDto = {
   hits: number;
   hitsPerSec?: number;
   activity?: number;
+  currentConnections?: number;
+  newConnectionsPerSec?: number;
+  traffic?: TrafficRateDto | null;
+  destinations: DestDto[];
+};
+
+type TrafficRateDto = {
+  rxBytesPerSec: number;
+  txBytesPerSec: number;
+  totalBytesPerSec: number;
+  sampleWindowMs: number;
+  source: string;
+};
+
+type TrafficGroupDto = {
+  name: string;
+  currentConnections: number;
+  connections: number;
   destinations: DestDto[];
 };
 
@@ -76,6 +97,7 @@ type SettingsDto = {
   globeDensity?: string;
   captureSni?: boolean;
   historyEnabled?: boolean;
+  enhancedMonitoring?: boolean;
   privacyAccepted?: boolean;
 };
 
@@ -85,6 +107,16 @@ type SnapshotDto = {
   destCount: number;
   liveConnections: number;
   missingPid: number;
+  attribution?: {
+    direct: number;
+    recovered: number;
+    unattributed: number;
+    ambiguous: number;
+    ownerGone: number;
+    ratio: number;
+  };
+  unattributed?: TrafficGroupDto | null;
+  monitoring?: { mode: string; status: string; message: string };
   externalOnly: boolean;
   includeUdp: boolean;
   tracesEnabled: boolean;
@@ -92,8 +124,6 @@ type SnapshotDto = {
   geoBackend?: string;
   geoMmdb?: boolean;
   geoAsnMmdb?: boolean;
-  elevated?: boolean;
-  elevationHint?: string | null;
   settings?: SettingsDto;
 };
 
@@ -105,6 +135,9 @@ type AppGroup = {
   traced: number;
   mappedHops: number;
   activity: number;
+  currentConnections: number;
+  newConnectionsPerSec: number;
+  traffic: TrafficRateDto | null;
 };
 
 let snapshot: SnapshotDto | null = null;
@@ -140,11 +173,11 @@ const el = {
   togLabels: document.getElementById("tog-labels") as HTMLInputElement,
   togLocalGeo: document.getElementById("tog-local-geo") as HTMLInputElement,
   togHistory: document.getElementById("tog-history") as HTMLInputElement,
+  togEnhanced: document.getElementById("tog-enhanced") as HTMLInputElement,
   selDensity: document.getElementById("sel-density") as HTMLSelectElement,
   btnReset: document.getElementById("btn-reset")!,
   btnTraceAll: document.getElementById("btn-trace-all")!,
   btnRecenter: document.getElementById("btn-recenter")!,
-  banner: document.getElementById("banner")!,
   toast: document.getElementById("toast")!,
   onboardingHost: document.getElementById("onboarding-host")!,
   appVersion: document.getElementById("app-version")!,
@@ -152,7 +185,19 @@ const el = {
   aboutVersion: document.getElementById("about-version")!,
   btnAbout: document.getElementById("btn-about") as HTMLButtonElement,
   btnAboutClose: document.getElementById("btn-about-close") as HTMLButtonElement,
+  inspector: document.getElementById("route-inspector")!,
 };
+
+const routeInspector = new RouteInspector(el.inspector, {
+  onClose: () => {
+    setSelectedPath(null);
+    paint(true);
+  },
+  onSelectRoute: (routeId) => {
+    setSelectedPath(routeId);
+    paint(true);
+  },
+});
 
 let appVersion = "0.1.0";
 
@@ -182,32 +227,18 @@ function finalRtt(hops: HopDto[]): number | null {
   return null;
 }
 
-function collectPaths(): GlobePath[] {
+function routeId(app: AppDto, dest: DestDto): string {
+  return `${app.id || app.name}|${dest.protocol}|${dest.ip}|${dest.port}`;
+}
+
+function collectPaths(applyFilter = true): GlobePath[] {
   if (!snapshot) return [];
   const paths: GlobePath[] = [];
   for (const app of snapshot.apps) {
     for (const dest of app.destinations) {
-      if (!matchesFilter(app, dest)) continue;
-      const hasHops = dest.trace.hops.length > 0;
-      if (dest.trace.status === "queued" || dest.trace.status === "running") {
-        paths.push({
-          id: `${app.name}|${dest.ip}|${dest.port}`,
-          app: app.name,
-          host: destName(dest),
-          ip: dest.ip,
-          port: dest.port,
-          protocol: dest.protocol,
-          hits: dest.hits,
-          color: colorForKey(app.name),
-          hops: [],
-          status: dest.trace.status,
-          rttMs: null,
-        });
-        continue;
-      }
-      if (dest.trace.status !== "done" || !hasHops) continue;
+      if (applyFilter && !matchesFilter(app, dest)) continue;
       paths.push({
-        id: `${app.name}|${dest.ip}|${dest.port}`,
+        id: routeId(app, dest),
         app: app.name,
         host: destName(dest),
         ip: dest.ip,
@@ -227,9 +258,14 @@ function collectPaths(): GlobePath[] {
           geoSource: h.geoSource,
           geoConfidence: h.geoConfidence,
           geoNote: h.geoNote,
+          asn: h.asn,
+          org: h.org,
         })),
-        status: "done",
+        status: dest.trace.status,
         rttMs: finalRtt(dest.trace.hops),
+        reachedTarget: !!dest.trace.reachedTarget,
+        targetRttMs: dest.trace.targetRttMs ?? null,
+        error: dest.trace.error,
       });
     }
   }
@@ -254,11 +290,14 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
       traced: 0,
       mappedHops: 0,
       activity: app.activity ?? app.hitsPerSec ?? 0,
+      currentConnections: app.currentConnections ?? 0,
+      newConnectionsPerSec: app.newConnectionsPerSec ?? app.hitsPerSec ?? 0,
+      traffic: app.traffic ?? null,
     };
     for (const dest of app.destinations) {
       if (!matchesFilter(app, dest)) continue;
       group.totalDests += 1;
-      const id = `${app.name}|${dest.ip}|${dest.port}`;
+      const id = routeId(app, dest);
       const path = byId.get(id);
       if (path) {
         group.paths.push(path);
@@ -277,6 +316,9 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
           hops: [],
           status: dest.trace.status,
           rttMs: finalRtt(dest.trace.hops),
+          reachedTarget: !!dest.trace.reachedTarget,
+          targetRttMs: dest.trace.targetRttMs ?? null,
+          error: dest.trace.error,
         });
         if (dest.trace.status === "done") group.traced += 1;
       }
@@ -300,10 +342,11 @@ function sidebarSignature(groups: AppGroup[]): string {
             `${p.host}:${p.port}:${p.status}:${p.hops.filter((h) => h.lat != null).length}`,
         )
         .join(";");
-      return `${g.name}|${g.traced}/${g.totalDests}|${g.activity.toFixed(1)}|${dests}`;
+      return `${g.name}|${g.traced}/${g.totalDests}|${g.activity.toFixed(1)}|${g.currentConnections}|${dests}`;
     })
     .join("||");
-  return `${foc}#${exp}#${filter}#${body}`;
+  const unattributed = snapshot?.unattributed;
+  return `${foc}#${exp}#${filter}#${body}#${unattributed?.connections ?? 0}`;
 }
 
 function currentSettings(): SettingsDto {
@@ -320,6 +363,7 @@ function currentSettings(): SettingsDto {
     globeDensity: el.selDensity.value,
     captureSni: false,
     historyEnabled: el.togHistory.checked,
+    enhancedMonitoring: el.togEnhanced.checked,
     privacyAccepted,
   };
 }
@@ -340,10 +384,18 @@ function paint(forceSidebar = false) {
     pendingSnap = null;
   }
 
-  const paths = collectPaths();
+  const allPaths = collectPaths(false);
+  const paths = collectPaths(true);
   const mapPaths = paths.filter((p) => p.status === "done" && p.hops.length > 0);
   const groups = collectAppGroups(paths);
   setFocusedApps([...focused]);
+  routeInspector.update(allPaths);
+  const selectedRoute = routeInspector.selectedRouteId;
+  setSelectedPath(
+    selectedRoute && allPaths.some((path) => path.id === selectedRoute)
+      ? selectedRoute
+      : null,
+  );
 
   if (snapshot) {
     const t = snapshot.traceStats;
@@ -355,41 +407,43 @@ function paint(forceSidebar = false) {
       t.done,
       mapPaths.length,
       snapshot.geoBackend,
-      snapshot.elevated ? 1 : 0,
+      snapshot.monitoring?.status,
       [...focused].join(","),
       el.selDensity.value,
     ].join("|");
 
     if (headerSig !== lastHeaderSig) {
       lastHeaderSig = headerSig;
-      el.statApps.textContent = `${snapshot.appCount} apps`;
+      el.statApps.textContent = `${snapshot.appCount}`;
       el.statTraces.textContent = snapshot.tracesEnabled
-        ? `tr q${t.queued} r${t.running} ✓${t.done}`
-        : "tr off";
+        ? `Q${t.queued} · R${t.running} · ${t.done} done`
+        : "offline";
       if (el.statGeo) {
         const backend = snapshot.geoBackend ?? "api";
-        el.statGeo.textContent = `geo ${backend}`;
+        el.statGeo.textContent = backend;
         el.statGeo.classList.toggle("accent", !!snapshot.geoMmdb);
         el.statGeo.title = snapshot.geoMmdb
           ? "Local MaxMind city DB loaded"
           : "Online geo only";
       }
-      if (el.banner) {
-        if (snapshot.elevationHint && !snapshot.elevated) {
-          el.banner.hidden = false;
-          el.banner.textContent = snapshot.elevationHint;
-        } else {
-          el.banner.hidden = true;
-        }
-      }
-      const missing =
-        snapshot.missingPid > 0 ? ` · ${snapshot.missingPid} without pid` : "";
-      el.status.textContent = `Live · ${snapshot.liveConnections} conns · ${mapPaths.length} paths${missing}`;
+      const attribution = snapshot.attribution;
+      const quality = attribution
+        ? ` · ${Math.round(attribution.ratio * 100)}% attributed`
+        : "";
+      const recovered = attribution?.recovered
+        ? ` · ${attribution.recovered} recovered`
+        : "";
+      const telemetry = snapshot.monitoring;
+      const traffic = telemetry?.mode === "native" ? " · traffic rates on" : "";
+      const trafficError = telemetry?.status === "unavailable"
+        ? ` · traffic rates unavailable: ${telemetry.message}`
+        : "";
+      el.status.textContent = `Live · ${snapshot.liveConnections} conns · ${mapPaths.length} paths${quality}${recovered}${traffic}${trafficError}`;
       el.btnClearFocus.hidden = focused.size === 0;
       el.sidebarSub.textContent =
         focused.size === 0
-          ? "Click focus · Shift+click multi-select"
-          : `Focused: ${[...focused].join(", ")}`;
+          ? "Select an app to isolate traffic"
+          : `Isolating ${[...focused].join(", ")}`;
     }
   }
 
@@ -402,8 +456,8 @@ function paint(forceSidebar = false) {
     hopCount = stats.hopCount;
     destCount = stats.destCount;
   }
-  el.statPaths.textContent = `${pathCount} paths`;
-  el.statHops.textContent = `${hopCount} hops · ${destCount} ★`;
+  el.statPaths.textContent = `${pathCount}`;
+  el.statHops.textContent = `${hopCount}`;
   el.globeStatus.textContent =
     pathCount > 0
       ? `${pathCount} paths · ${destCount} destinations · ${hopCount} hops`
@@ -431,7 +485,7 @@ function schedulePaint(snap?: SnapshotDto, immediate = false) {
 }
 
 function statusBadge(status: string): string {
-  if (status === "done") return `<span class="badge ok">traced</span>`;
+  if (status === "done") return `<span class="badge ok">observed</span>`;
   if (status === "running") return `<span class="badge run">tracing…</span>`;
   if (status === "queued") return `<span class="badge queue">queued</span>`;
   if (status === "failed") return `<span class="badge fail">fail</span>`;
@@ -439,19 +493,20 @@ function statusBadge(status: string): string {
 }
 
 function renderSidebar(groups: AppGroup[]) {
-  if (groups.length === 0) {
+  if (groups.length === 0 && !snapshot?.unattributed) {
     el.appList.innerHTML = `<div class="empty">No applications with internet connections yet.</div>`;
     return;
   }
 
-  el.appList.innerHTML = groups
+  const applications = groups
     .map((g) => {
       const isOpen = expanded.has(g.name) || focused.has(g.name);
       const isFocused = focused.has(g.name);
       const dim = focused.size > 0 && !isFocused;
-      const act =
-        g.activity > 0.05
-          ? `<span class="act"> · ${g.activity.toFixed(1)}/s</span>`
+      const act = g.traffic
+        ? `<span class="act"> · ↓${formatByteRate(g.traffic.rxBytesPerSec)} ↑${formatByteRate(g.traffic.txBytesPerSec)}</span>`
+        : g.newConnectionsPerSec > 0.05
+          ? `<span class="act"> · ${g.newConnectionsPerSec.toFixed(1)} new/s</span>`
           : "";
 
       const destRows = isOpen
@@ -476,24 +531,30 @@ function renderSidebar(groups: AppGroup[]) {
               const changed = destMeta?.pathChanged
                 ? ` <span class="badge run">path Δ</span>`
                 : "";
-              return `<div class="dest-row${destMeta?.pathChanged ? " flash" : ""}" data-dest-host="${escapeHtml(p.host)}" title="${escapeHtml(p.ip)}">
-                <span class="dest-star">★</span>
+              const marker = p.reachedTarget ? "★" : "◌";
+              const traceState = p.reachedTarget
+                ? `${mapped} mapped`
+                : p.status === "done"
+                  ? "partial"
+                  : statusBadge(p.status);
+              return `<button type="button" class="dest-row${destMeta?.pathChanged ? " flash" : ""}${routeInspector.selectedRouteId === p.id ? " selected" : ""}" data-route-id="${escapeHtml(p.id)}" data-dest-host="${escapeHtml(p.host)}" title="Inspect route to ${escapeHtml(p.ip)}" aria-pressed="${routeInspector.selectedRouteId === p.id}">
+                <span class="dest-star${p.reachedTarget ? "" : " partial"}">${marker}</span>
                 <span class="dest-main">
                   <span class="dest-host">${escapeHtml(p.host)}${org}${changed}</span>
-                  <span class="dest-meta">:${p.port} · ${escapeHtml(p.protocol)} · ${rtt}${destCity}</span>
+                  <span class="dest-meta">:${p.port} · ${escapeHtml(p.protocol)} · ${p.reachedTarget ? rtt : `last reply ${rtt}`}${destCity}</span>
                 </span>
-                <span class="dest-side">${mapped > 0 ? `${mapped} hops` : statusBadge(p.status)}</span>
-              </div>`;
+                <span class="dest-side">${mapped > 0 ? traceState : statusBadge(p.status)}</span>
+              </button>`;
             })
             .join("")
         : "";
 
       return `<div class="app-card${isFocused ? " focused" : ""}${dim ? " dim" : ""}" data-app="${escapeHtml(g.name)}">
-        <button type="button" class="app-row" data-app-toggle="${escapeHtml(g.name)}">
+        <button type="button" class="app-row" data-app-toggle="${escapeHtml(g.name)}" aria-expanded="${isOpen}">
           <span class="swatch" style="background:${g.color};box-shadow:0 0 10px ${g.color}"></span>
           <span class="app-main">
             <span class="app-name">${escapeHtml(g.name)}</span>
-            <span class="app-meta">${g.traced}/${g.totalDests} dests · ${g.mappedHops} hops${act}</span>
+            <span class="app-meta">${g.traced}/${g.totalDests} dests · ${g.currentConnections} current${act}</span>
           </span>
           <span class="chev">${isOpen ? "▾" : "▸"}</span>
         </button>
@@ -501,6 +562,49 @@ function renderSidebar(groups: AppGroup[]) {
       </div>`;
     })
     .join("");
+  el.appList.innerHTML = applications + renderUnattributed(snapshot?.unattributed ?? null);
+}
+
+function renderUnattributed(group: TrafficGroupDto | null): string {
+  if (!group) return "";
+  const stats = snapshot?.attribution;
+  const reasons = [
+    stats?.ownerGone ? `${stats.ownerGone} owner unavailable` : "",
+    stats?.ambiguous ? `${stats.ambiguous} ambiguous` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const rows = group.destinations
+    .slice()
+    .sort((a, b) => b.hits - a.hits)
+    .map(
+      (dest) => `<div class="dest-row" title="${escapeHtml(dest.ip)}">
+        <span class="dest-star muted-star">?</span>
+        <span class="dest-main">
+          <span class="dest-host">${escapeHtml(destName(dest))}</span>
+          <span class="dest-meta">:${dest.port} · ${escapeHtml(dest.protocol)} · ${dest.hits} connection${dest.hits === 1 ? "" : "s"}</span>
+        </span>
+        <span class="dest-side">${statusBadge(dest.trace.status)}</span>
+      </div>`,
+    )
+    .join("");
+  return `<details class="app-card unattributed-card">
+    <summary class="app-row">
+      <span class="swatch unattributed-swatch"></span>
+      <span class="app-main">
+        <span class="app-name">Unattributed traffic</span>
+        <span class="app-meta">${group.destinations.length} dests · ${group.currentConnections} current${reasons ? ` · ${reasons}` : ""}</span>
+      </span>
+      <span class="chev">▾</span>
+    </summary>
+    <div class="dest-list">${rows}</div>
+  </details>`;
+}
+
+function formatByteRate(bytes: number): string {
+  if (bytes < 1024) return `${Math.round(bytes)} B/s`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB/s`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB/s`;
 }
 
 function escapeHtml(s: string): string {
@@ -521,6 +625,15 @@ function showToast(msg: string) {
 
 function wireUi() {
   el.appList.addEventListener("click", (ev) => {
+    const routeButton = (ev.target as HTMLElement).closest<HTMLButtonElement>(
+      "[data-route-id]",
+    );
+    if (routeButton?.dataset.routeId) {
+      setSelectedPath(routeButton.dataset.routeId);
+      routeInspector.showRoute(routeButton.dataset.routeId, routeButton);
+      paint(true);
+      return;
+    }
     const btn = (ev.target as HTMLElement).closest<HTMLButtonElement>(
       "[data-app-toggle]",
     );
@@ -555,6 +668,7 @@ function wireUi() {
     el.togTraces,
     el.togLocalGeo,
     el.togHistory,
+    el.togEnhanced,
   ]) {
     t.addEventListener("change", () => {
       void pushSettings();
@@ -610,8 +724,29 @@ function wireUi() {
     if (ev.target === el.aboutModal) el.aboutModal.hidden = true;
   });
   window.addEventListener("keydown", (ev) => {
+    const target = ev.target as HTMLElement | null;
+    if (
+      ev.key === "/" &&
+      target?.tagName !== "INPUT" &&
+      target?.tagName !== "TEXTAREA"
+    ) {
+      ev.preventDefault();
+      el.filter.focus();
+      return;
+    }
     if (ev.key === "Escape" && !el.aboutModal.hidden) {
       el.aboutModal.hidden = true;
+      return;
+    }
+    if (ev.key === "Escape" && !el.inspector.hidden) {
+      routeInspector.close();
+      return;
+    }
+    if (ev.key === "Escape" && document.activeElement === el.filter) {
+      el.filter.value = "";
+      filter = "";
+      el.filter.blur();
+      paint(true);
     }
   });
 }
@@ -632,21 +767,18 @@ async function boot() {
 
   try {
     initGlobe(el.globe);
-    setHopClickHandler((apps, hosts) => {
-      focused.clear();
-      for (const a of apps) {
-        focused.add(a);
-        expanded.add(a);
+    setHopClickHandler((selection: HopSelection) => {
+      const routeIds = [...new Set(selection.routes.map((route) => route.pathId))];
+      if (routeIds.length === 1) {
+        setSelectedPath(routeIds[0]);
+        routeInspector.showRoute(routeIds[0]);
+      } else {
+        setSelectedPath(null);
+        routeInspector.showNode(selection);
       }
       paint(true);
-      // scroll first matching app into view
-      const card = el.appList.querySelector(
-        `[data-app="${CSS.escape(apps[0] ?? "")}"]`,
-      );
-      card?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      if (hosts[0]) {
-        el.status.textContent = `Selected hop · ${apps.join(", ")} · ${hosts[0]}`;
-      }
+      const place = selection.city || selection.hostname || selection.addr || "mapped node";
+      el.status.textContent = `Inspecting ${place} · ${routeIds.length} route${routeIds.length === 1 ? "" : "s"}`;
     });
     globeReady = true;
   } catch (e) {
@@ -656,6 +788,7 @@ async function boot() {
   try {
     const settings = await invoke<SettingsDto>("get_settings");
     privacyAccepted = !!settings.privacyAccepted;
+    el.togEnhanced.checked = !!settings.enhancedMonitoring;
     el.togExternal.checked = settings.externalOnly;
     el.togTraces.checked = settings.tracesEnabled;
     el.togLocalGeo.checked = !!settings.geoLocalOnly;

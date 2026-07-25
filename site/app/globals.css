@@ -1,0 +1,15 @@
+@import "../styles.css";
+
+::selection {
+  background: rgba(94, 234, 212, 0.22);
+  color: var(--text);
+}
+
+:focus-visible {
+  outline: 2px solid var(--mint);
+  outline-offset: 3px;
+}
+
+.copy-button:disabled {
+  cursor: default;
+}

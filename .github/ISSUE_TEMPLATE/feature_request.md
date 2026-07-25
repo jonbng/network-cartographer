@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea for Network Cartographer
+about: Suggest an idea for Map My Network
 title: ""
 labels: enhancement
 assignees: ""

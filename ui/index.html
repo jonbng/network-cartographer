@@ -6,123 +6,178 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
-    <title>Network Cartographer</title>
+    <title>Map My Network</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <div id="app" class="app">
       <div id="globe" class="globe-stage"></div>
+      <div class="map-grid" aria-hidden="true"></div>
       <div id="onboarding-host" class="overlay onboarding-host"></div>
 
-      <div id="banner" class="overlay banner" hidden></div>
       <div id="toast" class="overlay toast" hidden></div>
 
-      <header class="overlay header">
+      <aside class="overlay sidebar" id="sidebar">
         <div class="brand">
-          <span class="logo">NC</span>
-          <div>
-            <h1>Network Cartographer</h1>
-            <p class="subtitle" id="globe-status">All traceroutes · waiting…</p>
+          <span class="logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="8.5"></circle>
+              <path d="M3.5 12h17M12 3.5c2.3 2.4 3.5 5.2 3.5 8.5S14.3 18.1 12 20.5M12 3.5C9.7 5.9 8.5 8.7 8.5 12s1.2 6.1 3.5 8.5"></path>
+            </svg>
+          </span>
+          <div class="brand-copy">
+            <span class="eyebrow">Local network intelligence</span>
+            <h1>Map My Network</h1>
           </div>
+          <span class="live-mark"><i class="dot"></i>Live</span>
         </div>
-        <div class="stats">
-          <span class="pill live"><i class="dot"></i> live</span>
-          <span class="pill" id="stat-apps">0 apps</span>
-          <span class="pill" id="stat-paths">0 paths</span>
-          <span class="pill" id="stat-hops">0 hops</span>
-          <span class="pill accent" id="stat-traces">tr —</span>
-          <span class="pill" id="stat-geo" title="Geolocation backend">geo …</span>
+
+        <div class="sidebar-tools">
+          <label class="search-wrap" for="filter">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4 4"></path></svg>
+            <input
+              id="filter"
+              class="filter"
+              type="search"
+              placeholder="Search apps, hosts, IPs…"
+              autocomplete="off"
+            />
+            <span class="search-key">/</span>
+          </label>
         </div>
-        <div class="toolbar">
-          <label class="toggle">
-            <input type="checkbox" id="tog-external" checked />
-            <span>External</span>
-          </label>
-          <label class="toggle">
-            <input type="checkbox" id="tog-traces" checked />
-            <span>Trace</span>
-          </label>
-          <label class="toggle">
-            <input type="checkbox" id="tog-labels" checked />
-            <span>City labels</span>
-          </label>
-          <label class="toggle">
-            <input type="checkbox" id="tog-local-geo" />
-            <span>Local geo</span>
-          </label>
-          <label class="toggle">
-            <input type="checkbox" id="tog-history" />
-            <span>History</span>
-          </label>
-          <select id="sel-density" class="select" title="Globe density">
-            <option value="all">All hops</option>
-            <option value="destinations">Destinations</option>
-            <option value="hubs">Hubs + dests</option>
-          </select>
-          <input
-            id="filter"
-            class="filter"
-            type="search"
-            placeholder="Filter app or host…"
-            autocomplete="off"
-          />
-          <button id="btn-recenter" class="btn ghost" type="button">Recenter</button>
-          <button id="btn-reset" class="btn ghost" type="button">Reset</button>
-          <button id="btn-trace-all" class="btn" type="button">Trace all</button>
+
+        <div class="sidebar-head">
+          <div>
+            <div class="sidebar-title">Active applications</div>
+            <div class="sidebar-sub" id="sidebar-sub">Select an app to isolate traffic</div>
+          </div>
+          <button id="btn-clear-focus" class="btn text-btn sm" type="button" hidden>
+            Clear
+          </button>
+        </div>
+
+        <div class="sidebar-list" id="app-list"></div>
+
+        <div class="sidebar-foot">
+          <div class="legend-row">
+            <span class="legend-item"><i class="lg-dot hop"></i> Relay</span>
+            <span class="legend-item"><i class="lg-dot dest"></i> Destination</span>
+            <span class="legend-item"><i class="lg-dot partial"></i> Last mapped</span>
+            <span class="legend-item"><i class="lg-line gap"></i> Unmapped gap</span>
+          </div>
+          <button type="button" id="btn-about" class="about-button">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 11v5M12 8.1v.1"></path></svg>
+            <span>About &amp; privacy</span>
+            <span id="app-version" class="version" title="Map My Network version">v…</span>
+          </button>
+        </div>
+      </aside>
+
+      <aside
+        id="route-inspector"
+        class="overlay route-inspector"
+        role="complementary"
+        aria-labelledby="inspector-title"
+        hidden
+      ></aside>
+
+      <header class="overlay header">
+        <div class="map-heading">
+          <div class="heading-kicker"><span>01</span> Global traffic map</div>
+          <h2>Live topology</h2>
+          <p class="subtitle" id="globe-status">Acquiring network routes…</p>
+        </div>
+
+        <div class="stats" aria-label="Network statistics">
+          <div class="stat"><span class="stat-label">Processes</span><strong id="stat-apps">0</strong></div>
+          <div class="stat"><span class="stat-label">Routes</span><strong id="stat-paths">0</strong></div>
+          <div class="stat"><span class="stat-label">Nodes</span><strong id="stat-hops">0</strong></div>
+          <div class="stat technical"><span class="stat-label">Trace</span><strong id="stat-traces">—</strong></div>
+          <div class="stat technical"><span class="stat-label">Geo</span><strong id="stat-geo" title="Geolocation backend">…</strong></div>
         </div>
       </header>
 
-      <aside class="overlay sidebar" id="sidebar">
-        <div class="sidebar-head">
-          <div>
-            <div class="sidebar-title">Applications</div>
-            <div class="sidebar-sub" id="sidebar-sub">
-              Click focus · Shift+click multi-select
+      <div class="overlay map-controls" aria-label="Map controls">
+        <button id="btn-recenter" class="icon-btn" type="button" title="Recenter active paths">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"></path></svg>
+          <span>Recenter</span>
+        </button>
+        <span class="control-divider"></span>
+        <button id="btn-trace-all" class="btn primary" type="button">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 17.5 9 12l3.5 3.5L20 7"></path><circle cx="4" cy="17.5" r="1.5"></circle><circle cx="9" cy="12" r="1.5"></circle><circle cx="12.5" cy="15.5" r="1.5"></circle><circle cx="20" cy="7" r="1.5"></circle></svg>
+          Trace all
+        </button>
+        <details class="settings-menu">
+          <summary class="icon-btn" title="Map and capture settings">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19 13.5v-3l-2.2-.5a7.5 7.5 0 0 0-.8-1.8L17.2 6l-2.1-2.1L13 5.1a7.5 7.5 0 0 0-2-.1L9.2 3.9 7 6l1.1 2.2a7.5 7.5 0 0 0-.8 1.8l-2.3.5v3l2.3.5c.2.7.5 1.3.8 1.8L7 18l2.2 2.1L11 19a7.5 7.5 0 0 0 2 0l2.1 1.1 2.1-2.1-1.2-2.2c.4-.6.7-1.2.8-1.8l2.2-.5Z"></path></svg>
+            <span>Options</span>
+          </summary>
+          <div class="settings-popover">
+            <div class="popover-head">
+              <div><span class="eyebrow">View configuration</span><strong>Map options</strong></div>
+              <button id="btn-reset" class="btn text-btn sm" type="button">Reset data</button>
             </div>
+            <label class="setting-row">
+              <span><strong>External traffic</strong><small>Hide local connections</small></span>
+              <input type="checkbox" id="tog-external" checked />
+            </label>
+            <label class="setting-row">
+              <span><strong>Traceroutes</strong><small>Map path hops</small></span>
+              <input type="checkbox" id="tog-traces" checked />
+            </label>
+            <label class="setting-row">
+              <span><strong>City labels</strong><small>Name mapped regions</small></span>
+              <input type="checkbox" id="tog-labels" checked />
+            </label>
+            <label class="setting-row">
+              <span><strong>Local geolocation</strong><small>Use an offline database</small></span>
+              <input type="checkbox" id="tog-local-geo" />
+            </label>
+            <label class="setting-row">
+              <span><strong>Session archive</strong><small>Write local JSONL snapshots every minute</small></span>
+              <input type="checkbox" id="tog-history" />
+            </label>
+            <label class="setting-row">
+              <span><strong>Traffic rates</strong><small>Native per-app upload and download</small></span>
+              <input type="checkbox" id="tog-enhanced" />
+            </label>
+            <label class="density-row" for="sel-density">
+              <span><strong>Node density</strong><small>Detail shown on globe</small></span>
+              <select id="sel-density" class="select" title="Globe density">
+                <option value="all">All hops</option>
+                <option value="destinations">Destinations</option>
+                <option value="hubs">Hubs + destinations</option>
+              </select>
+            </label>
           </div>
-          <button id="btn-clear-focus" class="btn ghost sm" type="button" hidden>
-            Show all
-          </button>
-        </div>
-        <div class="legend-row">
-          <span class="legend-item"><i class="lg-dot dest"></i> Final destination</span>
-          <span class="legend-item"><i class="lg-dot hop"></i> Transit hop</span>
-        </div>
-        <div class="sidebar-list" id="app-list"></div>
-      </aside>
+        </details>
+      </div>
 
       <footer class="overlay footer">
-        <span id="status-msg">Starting monitor…</span>
-        <span class="hint">
-          <span id="app-version" class="version" title="Network Cartographer version">v…</span>
-          · Drag orbit · scroll zoom · click hop → app ·
-          <button type="button" id="btn-about" class="linkish">About / privacy</button>
-        </span>
+        <span id="status-msg" class="status-message">Starting monitor…</span>
+        <span class="hint"><kbd>drag</kbd> orbit <i></i> <kbd>scroll</kbd> zoom <i></i> select a node to inspect</span>
       </footer>
 
       <div id="about-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="about-title">
         <div class="modal-card">
-          <h2 id="about-title">About Network Cartographer</h2>
-          <p id="about-version">Version …</p>
-          <p>
-            Live per-application network monitor with traceroute paths on a 3D globe.
-            MIT License · © Jonathan Bangert
-          </p>
-          <p class="modal-note">
-            Source, issues, and security reports:
-            <a href="https://github.com/jonbng/network-cartographer" target="_blank" rel="noopener noreferrer"
-              >github.com/jonbng/network-cartographer</a
-            >
-          </p>
-          <h3>Privacy summary</h3>
+          <div class="modal-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.5 12h17M12 3.5c2.3 2.4 3.5 5.2 3.5 8.5S14.3 18.1 12 20.5M12 3.5C9.7 5.9 8.5 8.7 8.5 12s1.2 6.1 3.5 8.5"></path></svg>
+          </div>
+          <h2 id="about-title">Map My Network</h2>
+          <p id="about-version" class="modal-version">Version …</p>
+          <p>Live per-application network monitoring with traceroute paths rendered on a 3D globe.</p>
+          <h3>Privacy by design</h3>
           <ul>
-            <li>Monitoring is local (OS socket tables + process metadata).</li>
-            <li>Optional online GeoIP may send IP addresses to third parties.</li>
-            <li>Use a local GeoLite2 MMDB (<code>NETWORK_CARTOGRAPHER_MMDB</code>) to reduce or avoid online GeoIP.</li>
-            <li>Free ip-api.com batch lookups use HTTP only (HTTPS is a paid plan).</li>
+            <li>Connection monitoring and process metadata stay on this machine.</li>
+            <li>Online GeoIP may share IP addresses with third-party providers.</li>
+            <li>Use a local GeoLite2 MMDB to keep geolocation offline.</li>
           </ul>
+          <p class="modal-note">
+            MIT License · © Jonathan Bangert ·
+            <a href="https://github.com/jonbng/network-cartographer" target="_blank" rel="noopener noreferrer">View source on GitHub</a>
+          </p>
           <div class="modal-actions">
-            <button type="button" id="btn-about-close" class="btn ghost">Close</button>
+            <button type="button" id="btn-about-close" class="btn primary">Done</button>
           </div>
         </div>
       </div>
