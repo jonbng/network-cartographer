@@ -1,0 +1,13 @@
+[package]
+name = "hopglobe-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal-native hopglobe experiment (globe + TUI chrome, no HTML)"
+publish = false
+
+[dependencies]
+crossterm = "0.28"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+ratatui = "0.29"
+base64 = "0.22"
+anyhow = "1"

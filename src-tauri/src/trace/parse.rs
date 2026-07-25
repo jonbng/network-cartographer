@@ -1,0 +1,255 @@
+use std::net::IpAddr;
+use std::time::Instant;
+
+#[derive(Debug, Clone)]
+pub struct Hop {
+    pub ttl: u8,
+    pub addr: Option<IpAddr>,
+    pub rtt_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceResult {
+    #[allow(dead_code)]
+    pub target: IpAddr,
+    pub hops: Vec<Hop>,
+    pub finished_at: Instant,
+    pub error: Option<String>,
+}
+
+impl TraceResult {
+    pub fn hop_count(&self) -> usize {
+        self.hops.len()
+    }
+
+    /// Best RTT on the last hop that answered (approx end-to-end).
+    pub fn final_rtt_ms(&self) -> Option<f64> {
+        self.hops.iter().rev().find_map(|h| h.rtt_ms)
+    }
+}
+
+/// Parse output from traceroute / tracert / tracepath (`-n` numeric form preferred).
+pub fn parse_traceroute_output(target: IpAddr, stdout: &str) -> TraceResult {
+    let mut hops = Vec::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Skip headers
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("traceroute")
+            || lower.starts_with("tracing route")
+            || lower.starts_with("over a maximum")
+            || lower.starts_with("tracepath")
+        {
+            continue;
+        }
+
+        if let Some(hop) = parse_hop_line(line) {
+            hops.push(hop);
+        }
+    }
+
+    TraceResult {
+        target,
+        hops,
+        finished_at: Instant::now(),
+        error: None,
+    }
+}
+
+fn parse_hop_line(line: &str) -> Option<Hop> {
+    // Common patterns:
+    // " 1  10.16.96.2  2.025 ms"
+    // " 3  * * *"
+    // " 1    <1 ms    <1 ms    <1 ms  192.168.1.1"  (tracert)
+    // " 1:  192.168.1.1  1.234ms" (tracepath-ish)
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+
+    // Hop number: first token, may end with ':'
+    let ttl_str = tokens[0].trim_end_matches(':');
+    let ttl: u8 = ttl_str.parse().ok()?;
+    if ttl == 0 {
+        return None;
+    }
+
+    // Timeout-only line
+    if tokens.len() >= 2 && tokens[1..].iter().all(|t| *t == "*" || t.ends_with('*')) {
+        return Some(Hop {
+            ttl,
+            addr: None,
+            rtt_ms: None,
+        });
+    }
+
+    let mut addr: Option<IpAddr> = None;
+    let mut rtts: Vec<f64> = Vec::new();
+
+    let mut i = 1;
+    while i < tokens.len() {
+        let t = tokens[i];
+
+        if t == "*" {
+            i += 1;
+            continue;
+        }
+
+        // "<1" ms style from tracert
+        if t.starts_with('<') {
+            if let Ok(v) = t.trim_start_matches('<').parse::<f64>() {
+                rtts.push(v.max(0.1));
+            }
+            // optional following "ms"
+            if i + 1 < tokens.len() && tokens[i + 1].eq_ignore_ascii_case("ms") {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        // IP address
+        if let Ok(ip) = t.parse::<IpAddr>() {
+            addr = Some(ip);
+            i += 1;
+            continue;
+        }
+
+        // RTT like "2.025" followed by "ms", or "2.025ms"
+        if let Some(ms_val) = parse_rtt_token(t) {
+            rtts.push(ms_val);
+            if i + 1 < tokens.len() && tokens[i + 1].eq_ignore_ascii_case("ms") {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if t.eq_ignore_ascii_case("ms") {
+            i += 1;
+            continue;
+        }
+
+        // Hostname (when -n not used) — skip unless we already have IP
+        i += 1;
+    }
+
+    // If only timeouts after hop number
+    if addr.is_none() && rtts.is_empty() {
+        // Might be "* * *" already handled; otherwise treat as timeout hop
+        if tokens.iter().any(|t| *t == "*") {
+            return Some(Hop {
+                ttl,
+                addr: None,
+                rtt_ms: None,
+            });
+        }
+        return None;
+    }
+
+    let rtt_ms = if rtts.is_empty() {
+        None
+    } else {
+        Some(rtts.iter().sum::<f64>() / rtts.len() as f64)
+    };
+
+    Some(Hop { ttl, addr, rtt_ms })
+}
+
+fn parse_rtt_token(t: &str) -> Option<f64> {
+    let t = t.trim();
+    if let Some(stripped) = t.strip_suffix("ms").or_else(|| t.strip_suffix("MS")) {
+        return stripped.parse().ok();
+    }
+    // bare number that looks like rtt (has decimal or small int)
+    if t.contains('.') {
+        return t.parse().ok();
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn parse_linux_traceroute_n() {
+        let out = "\
+traceroute to 1.1.1.1 (1.1.1.1), 5 hops max, 60 byte packets
+ 1  10.16.96.2  2.025 ms
+ 2  10.64.1.113  3.819 ms
+ 3  * * *
+ 4  1.1.1.1  11.937 ms
+";
+        let target = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        let r = parse_traceroute_output(target, out);
+        assert_eq!(r.hops.len(), 4);
+        assert_eq!(r.hops[0].addr, Some(IpAddr::V4(Ipv4Addr::new(10, 16, 96, 2))));
+        assert!(r.hops[0].rtt_ms.unwrap() > 2.0);
+        assert!(r.hops[2].addr.is_none());
+        assert_eq!(r.hops[3].addr, Some(target));
+    }
+
+    #[test]
+    fn parse_windows_tracert() {
+        let out = "\
+Tracing route to 1.1.1.1 over a maximum of 30 hops
+
+  1    <1 ms    <1 ms    <1 ms  192.168.1.1
+  2     4 ms     3 ms     4 ms  10.0.0.1
+  3     *        *        *     Request timed out.
+  4    12 ms    11 ms    12 ms  1.1.1.1
+";
+        let target = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        let r = parse_traceroute_output(target, out);
+        assert!(r.hops.len() >= 3);
+        assert_eq!(
+            r.hops[0].addr,
+            Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
+        );
+    }
+
+    #[test]
+    fn parse_single_probe_line() {
+        let hop = parse_hop_line(" 5  137.164.23.144  7.781 ms").unwrap();
+        assert_eq!(hop.ttl, 5);
+        assert!(hop.rtt_ms.unwrap() > 7.0);
+    }
+
+    #[test]
+    fn parse_macos_traceroute_n() {
+        // BSD traceroute -n / -I numeric form (macOS)
+        let out = "\
+traceroute to 1.1.1.1 (1.1.1.1), 20 hops max, 40 byte packets
+ 1  192.168.1.1  1.234 ms
+ 2  10.0.0.1  4.560 ms
+ 3  * * *
+ 4  1.1.1.1  12.100 ms
+";
+        let target = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        let r = parse_traceroute_output(target, out);
+        assert_eq!(r.hops.len(), 4);
+        assert_eq!(
+            r.hops[0].addr,
+            Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
+        );
+        assert!(r.hops[0].rtt_ms.unwrap() > 1.0);
+        assert!(r.hops[2].addr.is_none());
+        assert_eq!(r.hops[3].addr, Some(target));
+    }
+
+    #[test]
+    fn parse_windows_request_timed_out_line() {
+        let hop = parse_hop_line("  3     *        *        *     Request timed out.").unwrap();
+        assert_eq!(hop.ttl, 3);
+        assert!(hop.addr.is_none());
+        assert!(hop.rtt_ms.is_none());
+    }
+}

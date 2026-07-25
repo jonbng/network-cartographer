@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS cross targets
+        if: matrix.platform == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: release-${{ matrix.platform }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "hopglobe v__VERSION__"
+          releaseBody: |
+            ## hopglobe v__VERSION__
+
+            Desktop network monitor with traceroute paths on a 3D globe.
+
+            ### Install
+
+            Download the asset for your OS from this release, then install as usual.
+
+            | Platform | Typical assets |
+            |----------|----------------|
+            | Linux | `.deb`, `.AppImage`, `.rpm` |
+            | macOS | `.dmg` / `.app` (may be unsigned — right-click → Open on first launch) |
+            | Windows | `.msi` / NSIS `.exe` (SmartScreen may warn until signed) |
+
+            See [CHANGELOG.md](https://github.com/jonbng/hopglobe/blob/main/CHANGELOG.md) and the README for privacy notes and GeoLite2 setup.
+
+            ### Verify
+
+            Prefer building from source if you need full auditability:
+
+            ```bash
+            npm install
+            npm run tauri build
+            ```
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

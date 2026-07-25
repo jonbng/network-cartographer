@@ -1,0 +1,45 @@
+{
+  "name": "hopglobe",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop app that shows which applications talk to the internet, where they connect, and traceroute paths on a 3D globe",
+  "author": "Jonathan Bangert",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jonbng/hopglobe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jonbng/hopglobe/issues"
+  },
+  "homepage": "https://github.com/jonbng/hopglobe#readme",
+  "keywords": [
+    "tauri",
+    "network",
+    "traceroute",
+    "geoip",
+    "desktop",
+    "globe",
+    "monitoring",
+    "hopglobe"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "check": "tsc --noEmit && cargo check --locked --manifest-path src-tauri/Cargo.toml",
+    "test": "cargo test --locked --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "globe.gl": "^2.46.1",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0"
+  }
+}

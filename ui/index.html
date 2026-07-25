@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>HopGlobe</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <div id="globe" class="globe-stage"></div>
+      <div id="onboarding-host" class="overlay onboarding-host"></div>
+
+      <div id="banner" class="overlay banner" hidden></div>
+      <div id="toast" class="overlay toast" hidden></div>
+
+      <header class="overlay header">
+        <div class="brand">
+          <span class="logo">HG</span>
+          <div>
+            <h1>HopGlobe</h1>
+            <p class="subtitle" id="globe-status">All traceroutes · waiting…</p>
+          </div>
+        </div>
+        <div class="stats">
+          <span class="pill live"><i class="dot"></i> live</span>
+          <span class="pill" id="stat-apps">0 apps</span>
+          <span class="pill" id="stat-paths">0 paths</span>
+          <span class="pill" id="stat-hops">0 hops</span>
+          <span class="pill accent" id="stat-traces">tr —</span>
+          <span class="pill" id="stat-geo" title="Geolocation backend">geo …</span>
+        </div>
+        <div class="toolbar">
+          <label class="toggle">
+            <input type="checkbox" id="tog-external" checked />
+            <span>External</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="tog-udp" />
+            <span>UDP</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="tog-traces" checked />
+            <span>Trace</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="tog-labels" checked />
+            <span>City labels</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="tog-local-geo" />
+            <span>Local geo</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="tog-history" />
+            <span>History</span>
+          </label>
+          <select id="sel-density" class="select" title="Globe density">
+            <option value="all">All hops</option>
+            <option value="destinations">Destinations</option>
+            <option value="hubs">Hubs + dests</option>
+          </select>
+          <input
+            id="filter"
+            class="filter"
+            type="search"
+            placeholder="Filter app or host…"
+            autocomplete="off"
+          />
+          <button id="btn-recenter" class="btn ghost" type="button">Recenter</button>
+          <button id="btn-reset" class="btn ghost" type="button">Reset</button>
+          <button id="btn-trace-all" class="btn" type="button">Trace all</button>
+        </div>
+      </header>
+
+      <aside class="overlay sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <div>
+            <div class="sidebar-title">Applications</div>
+            <div class="sidebar-sub" id="sidebar-sub">
+              Click focus · Shift+click multi-select
+            </div>
+          </div>
+          <button id="btn-clear-focus" class="btn ghost sm" type="button" hidden>
+            Show all
+          </button>
+        </div>
+        <div class="legend-row">
+          <span class="legend-item"><i class="lg-dot dest"></i> Final destination</span>
+          <span class="legend-item"><i class="lg-dot hop"></i> Transit hop</span>
+        </div>
+        <div class="sidebar-list" id="app-list"></div>
+      </aside>
+
+      <footer class="overlay footer">
+        <span id="status-msg">Starting monitor…</span>
+        <span class="hint">
+          <span id="app-version" class="version" title="hopglobe version">v…</span>
+          · Drag orbit · scroll zoom · click hop → app ·
+          <button type="button" id="btn-about" class="linkish">About / privacy</button>
+        </span>
+      </footer>
+
+      <div id="about-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="about-title">
+        <div class="modal-card">
+          <h2 id="about-title">About hopglobe</h2>
+          <p id="about-version">Version …</p>
+          <p>
+            Live per-application network monitor with traceroute paths on a 3D globe.
+            MIT License · © Jonathan Bangert
+          </p>
+          <p class="modal-note">
+            Source, issues, and security reports:
+            <a href="https://github.com/jonbng/hopglobe" target="_blank" rel="noopener noreferrer"
+              >github.com/jonbng/hopglobe</a
+            >
+          </p>
+          <h3>Privacy summary</h3>
+          <ul>
+            <li>Monitoring is local (OS socket tables + process metadata).</li>
+            <li>Optional online GeoIP may send IP addresses to third parties.</li>
+            <li>Use a local GeoLite2 MMDB (<code>HOPGLOBE_MMDB</code>) to reduce or avoid online GeoIP.</li>
+            <li>Free ip-api.com batch lookups use HTTP only (HTTPS is a paid plan).</li>
+          </ul>
+          <div class="modal-actions">
+            <button type="button" id="btn-about-close" class="btn ghost">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
