@@ -1,35 +1,45 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
+import { IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
+
+const mono = IBM_Plex_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500"],
+  variable: "--font-mono",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://mapmy.network"),
-  title: "Map My Network — See where your apps connect",
+  title: "Map My Network",
   description:
-    "See which apps are online, where they connect, and how traffic crosses the globe — all from one local command.",
+    "Local CLI that maps per-app TCP connections and traceroute paths on a loopback globe UI. One command, no account.",
   openGraph: {
     title: "Map My Network",
-    description: "Your network, made visible. No account, no installer, one command.",
+    description:
+      "Local CLI: per-app TCP connections, traceroutes, loopback globe. No account. One command.",
     type: "website",
     url: "/",
     siteName: "Map My Network",
   },
   twitter: {
-    card: "summary_large_image",
+    card: "summary",
     title: "Map My Network",
-    description: "Your network, made visible. No account, no installer, one command.",
+    description:
+      "Local CLI: per-app TCP connections, traceroutes, loopback globe. No account. One command.",
   },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#060a0a",
+  themeColor: "#0b0c0c",
   colorScheme: "dark",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="en" className={mono.variable}>
+      <body className={mono.className}>{children}</body>
     </html>
   );
 }

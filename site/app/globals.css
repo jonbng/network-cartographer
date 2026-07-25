@@ -1,13 +1,13 @@
 @import "../styles.css";
 
 ::selection {
-  background: rgba(94, 234, 212, 0.22);
+  background: var(--accent-dim);
   color: var(--text);
 }
 
 :focus-visible {
-  outline: 2px solid var(--mint);
-  outline-offset: 3px;
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .copy-button:disabled {

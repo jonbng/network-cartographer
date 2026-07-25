@@ -7,6 +7,8 @@ const commands = {
   windows: "irm https://mapmy.network/run.ps1 | iex",
 } as const;
 
+const GITHUB_URL = "https://github.com/jonbng/network-cartographer";
+
 type Platform = keyof typeof commands;
 
 export function CommandCard() {
@@ -20,7 +22,7 @@ export function CommandCard() {
   }
 
   return (
-    <div className="run-card" id="run">
+    <div className="run-block" id="run">
       <div className="run-tabs" role="tablist" aria-label="Operating system">
         <button
           className={`run-tab${platform === "unix" ? " active" : ""}`}
@@ -40,26 +42,35 @@ export function CommandCard() {
         >
           Windows
         </button>
-        <span className="run-label">Run once</span>
       </div>
+
       <div className="command-row" role="tabpanel">
         <span className="prompt" aria-hidden="true">
-          ›
+          $
         </span>
         <code>{commands[platform]}</code>
         <button
-          className="copy-button"
+          className={`copy-button${copied ? " copied" : ""}`}
           type="button"
           onClick={copyCommand}
           aria-label="Copy command"
         >
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <rect x="8" y="8" width="10" height="10" rx="2" />
-            <path d="M15 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" />
-          </svg>
-          <span aria-live="polite">{copied ? "Copied" : "Copy"}</span>
+          {copied ? "Copied" : "Copy"}
         </button>
       </div>
+
+      <p className="run-note">
+        Downloads a checksummed binary, runs locally, exits when you quit. No account.
+      </p>
+
+      <a
+        className="star-button"
+        href={GITHUB_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        Star on GitHub
+      </a>
     </div>
   );
 }
