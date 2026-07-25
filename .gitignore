@@ -10,6 +10,7 @@ dist-ssr/
 # Rust
 /target
 /server/target
+/geo-service/target
 
 # Optional offline MaxMind DB (do not redistribute GeoLite2)
 *.mmdb

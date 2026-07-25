@@ -8,9 +8,9 @@
 
 ## What Map My Network does
 
-Map My Network is a **local** network connection monitor. It reads OS socket tables and process metadata, runs normal-user traceroute tools, and may send **IP addresses** to third-party GeoIP APIs unless a local MaxMind database is configured.
+Map My Network is a **local** network connection monitor. It reads OS socket tables and process metadata, runs normal-user traceroute tools, and may send **public hop/destination IP addresses** to `mapmy.network` for geolocation after consent (unless local-only GeoIP is enabled).
 
-It does **not** operate a Map My Network backend that receives your connection lists or process names.
+It does **not** receive your connection lists or process names on any Map My Network server.
 
 ## Reporting a vulnerability
 
@@ -41,13 +41,12 @@ You should receive an acknowledgment within a few days when possible. We will co
 
 **Out of scope**
 
-- Inaccuracy of third-party GeoIP or reverse DNS
-- Rate limits or ToS of external GeoIP services
+- Inaccuracy of GeoIP databases or reverse DNS
+- Hosted geo rate limits or MaxMind GeoLite terms for operators
 - OS traceroute tool behavior itself
 - Behavior caused by unsupported third-party traceroute variants
 
 ## Hardening tips for users
 
-- Prefer a local GeoLite2 City (and optional ASN) database: set `NETWORK_CARTOGRAPHER_MMDB` / `NETWORK_CARTOGRAPHER_ASN_MMDB` or place files under standard GeoIP paths (see README)
-- Enable **Local geo** in the UI when an MMDB is available to reduce online lookups
+- Enable **Local geolocation** with GeoLite2 City (and optional ASN) to avoid hosted lookups: set `NETWORK_CARTOGRAPHER_MMDB` / `NETWORK_CARTOGRAPHER_ASN_MMDB` or place files under standard GeoIP paths (see README)
 - Keep the CLI bound to its default loopback address; do not place it behind a public proxy

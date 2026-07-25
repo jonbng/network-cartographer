@@ -692,7 +692,8 @@ function confidenceAlpha(score: number | null): number {
 
 function sourceLabel(source: string): string {
   if (source === "mmdb") return "local MaxMind database";
-  if (source === "geoip" || source === "ipwho") return "online GeoIP";
+  if (source === "hosted" || source === "geolite") return "Map My Network hosted geo";
+  if (source === "geoip" || source === "ipwho") return "legacy online GeoIP";
   if (source.startsWith("rdns")) return "reverse DNS hint";
   if (source.startsWith("inferred")) return "route and latency inference";
   return source;

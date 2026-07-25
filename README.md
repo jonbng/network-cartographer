@@ -142,9 +142,11 @@ If no supported command is installed, connection monitoring still works and rout
 
 ## Geolocation
 
-Geolocation is approximate. The app combines reverse DNS hints, airport codes, GeoIP, latency consistency, and neighboring hops.
+Geolocation is approximate. The app combines reverse DNS hints, airport codes, hosted or local GeoIP, latency consistency, and neighboring hops.
 
-For fully local lookups, provide MaxMind databases with either environment variables or standard data directories:
+By default (after the privacy notice), `netcart` batches **public** hop and destination IPs to `https://mapmy.network/api/v1/geo`. Override the endpoint with `NETWORK_CARTOGRAPHER_GEO_URL` (or `NETCART_GEO_URL`) for staging.
+
+For fully offline lookups, enable **Local geolocation** and provide MaxMind databases:
 
 | Variable | Purpose |
 |----------|---------|
@@ -153,16 +155,16 @@ For fully local lookups, provide MaxMind databases with either environment varia
 
 Common locations include the project root, `data/`, the directory beside the binary, `~/.local/share/GeoIP/`, `~/Library/Application Support/GeoIP/`, and `%LOCALAPPDATA%\GeoIP\`.
 
-Do not commit MaxMind databases; they are ignored by Git and remain subject to MaxMind's license.
+Do not commit MaxMind databases; they are ignored by Git and remain subject to MaxMind's license. Operators of the hosted service keep their own copies on a private VPS (see [`site/README.md`](./site/README.md) and [`geo-service/`](./geo-service/)).
 
 ## Privacy
 
 - Socket tables, process names, connection lists, and settings are handled locally.
 - The server binds only to `127.0.0.1`.
 - The browser UI and API are served by the CLI process.
-- Online GeoIP can send hop and destination IP addresses to `ip-api.com` or `ipwho.is` after the first-run privacy notice is accepted.
+- After the first-run privacy notice, public hop and destination IPs may be sent to Map My Network for geolocation.
 - Reverse DNS may query hostnames and airport codes.
-- Enable **Local geolocation** with a GeoLite2 database to avoid online GeoIP lookups.
+- Enable **Local geolocation** with a GeoLite2 database to avoid hosted lookups entirely.
 
 See [SECURITY.md](./SECURITY.md) for reporting guidance.
 
@@ -173,7 +175,7 @@ See [SECURITY.md](./SECURITY.md) for reporting guidance.
 - Short-lived connections may disappear between polling intervals. Connections observed before teardown keep their exact socket-to-process attribution through `TIME_WAIT`.
 - Sockets whose owner cannot be proven are shown separately as **Unattributed traffic** rather than being presented as an application.
 - Per-application byte rates require native OS telemetry and are reported as unavailable by the portable collector.
-- Free online GeoIP services have rate limits and their own terms.
+- Hosted geolocation depends on `mapmy.network` availability; the monitor still works without pins.
 
 ## License
 

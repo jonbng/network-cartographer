@@ -29,16 +29,17 @@ function mountPrivacyModal(onAccept: () => void | Promise<void>): void {
       </p>
       <ul>
         <li>
-          For map placement, hop / destination <strong>IP addresses</strong> may be sent to
-          third-party GeoIP APIs (<code>ip-api.com</code>, <code>ipwho.is</code>) unless you use a
-          local MaxMind GeoLite2 database.
+          For map placement, hop / destination <strong>public IP addresses</strong> may be sent to
+          Map My Network (<code>mapmy.network</code>) for geolocation unless you enable local-only
+          geo with a MaxMind GeoLite2 database.
         </li>
+        <li>Connection lists and process names stay on this machine.</li>
         <li>Reverse DNS may be queried for hostnames and airport codes.</li>
         <li>Traceroute runs OS tools (<code>traceroute</code> / <code>tracert</code>) with limited concurrency.</li>
       </ul>
       <p class="modal-note">
-        Prefer offline geo by placing <code>GeoLite2-City.mmdb</code> on disk or setting
-        <code>NETWORK_CARTOGRAPHER_MMDB</code> (see README). Free ip-api.com lookups use HTTP only.
+        Offline mode: place <code>GeoLite2-City.mmdb</code> on disk (or set
+        <code>NETWORK_CARTOGRAPHER_MMDB</code>) and enable <strong>Local geolocation</strong>.
       </p>
       <div class="modal-actions">
         <button type="button" class="btn primary" data-accept>I understand — continue</button>

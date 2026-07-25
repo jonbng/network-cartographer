@@ -1,0 +1,21 @@
+[Unit]
+Description=Map My Network private GeoLite lookup service
+After=network.target
+
+[Service]
+Type=simple
+User=mapmy
+WorkingDirectory=/opt/mapmy-geo
+EnvironmentFile=/opt/mapmy-geo/.env
+ExecStart=/opt/mapmy-geo/mapmy-geo
+Restart=on-failure
+RestartSec=3
+# Bind privately; put nginx/Caddy or firewall in front if exposing beyond localhost.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mapmy-geo/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

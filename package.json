@@ -32,7 +32,7 @@
     "site:build": "npm --prefix site run build",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "check": "tsc --noEmit && cargo check --locked --manifest-path server/Cargo.toml",
+    "check": "tsc --noEmit && cargo check --locked --manifest-path server/Cargo.toml && cargo check --locked --manifest-path geo-service/Cargo.toml",
     "test": "cargo test --locked --manifest-path server/Cargo.toml"
   },
   "dependencies": {

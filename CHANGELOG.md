@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Hosted geolocation via `mapmy.network/api/v1/geo` (self-hosted GeoLite on a private VPS) replaces free `ip-api.com` / `ipwho.is` fallbacks
+- Privacy copy and docs describe Map My Network hosted geo; local MMDB remains an offline opt-in
+
 ## [0.1.1] — 2026-07-25
 
 ### Fixed

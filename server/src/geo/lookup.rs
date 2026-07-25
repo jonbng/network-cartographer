@@ -31,31 +31,25 @@ pub struct IpMeta {
 }
 
 #[derive(Debug, Deserialize)]
-struct IpApiResponse {
-    status: String,
-    #[serde(default)]
-    city: Option<String>,
-    #[serde(default, rename = "countryCode")]
-    country_code: Option<String>,
-    #[serde(default)]
-    lat: Option<f64>,
-    #[serde(default)]
-    lon: Option<f64>,
-    #[serde(default)]
-    query: Option<String>,
+struct HostedGeoResponse {
+    results: Vec<HostedGeoResult>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IpWhoResponse {
-    success: Option<bool>,
+struct HostedGeoResult {
+    ip: String,
     #[serde(default)]
     city: Option<String>,
     #[serde(default)]
-    country_code: Option<String>,
+    country: Option<String>,
     #[serde(default)]
     latitude: Option<f64>,
     #[serde(default)]
     longitude: Option<f64>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    confidence: Option<String>,
 }
 
 pub struct GeoCache {
@@ -82,8 +76,8 @@ impl GeoCache {
             });
         if mmdb.is_none() {
             eprintln!(
-                "[geo] no GeoLite2-City.mmdb found — using online geo only \
-                 (place file at project root or data/GeoLite2-City.mmdb)"
+                "[geo] no local GeoLite2-City.mmdb — hosted geo via mapmy.network \
+                 (optional offline DB: project root or data/GeoLite2-City.mmdb)"
             );
         }
         Self {
@@ -93,7 +87,7 @@ impl GeoCache {
         }
     }
 
-    /// Status string for UI, e.g. "mmdb+api" or "api".
+    /// Status string for UI, e.g. "mmdb+hosted" or "hosted".
     pub fn backend_label(&self, local_only: bool, asn: bool) -> String {
         let mut parts = Vec::new();
         if self.mmdb.is_some() {
@@ -103,7 +97,7 @@ impl GeoCache {
             parts.push("asn");
         }
         if !local_only {
-            parts.push("api");
+            parts.push("hosted");
         }
         if parts.is_empty() {
             "rdns".into()
@@ -169,34 +163,23 @@ impl GeoCache {
         }
 
         if !local_only {
-            // Stage 2: batch ip-api (up to 100)
-            for chunk in todo.chunks(100) {
-                if let Some(batch) = fetch_ip_api_batch(chunk) {
+            // Stage 2: Map My Network hosted geo (public hop IPs only)
+            let need_hosted: Vec<IpAddr> = todo
+                .iter()
+                .copied()
+                .filter(|ip| {
+                    partial
+                        .get(ip)
+                        .map(|(_, h)| !h.iter().any(|x| x.source == "mmdb"))
+                        .unwrap_or(true)
+                })
+                .collect();
+            for chunk in need_hosted.chunks(40) {
+                if let Some(batch) = fetch_hosted_geo(chunk) {
                     for (ip, hint) in batch {
                         if let Some((_, hints)) = partial.get_mut(&ip) {
                             hints.push(hint);
                         }
-                    }
-                }
-            }
-
-            // Stage 3: ipwho.is for remaining gaps
-            let mut who_budget = 12usize;
-            for &ip in &todo {
-                let needs_net_geo = partial
-                    .get(&ip)
-                    .map(|(_, h)| {
-                        !h.iter().any(|x| {
-                            x.source == "geoip" || x.source == "mmdb" || x.source == "ipwho"
-                        })
-                    })
-                    .unwrap_or(true);
-                if needs_net_geo && who_budget > 0 {
-                    if let Some(h) = fetch_ipwho(ip) {
-                        if let Some((_, hints)) = partial.get_mut(&ip) {
-                            hints.push(h);
-                        }
-                        who_budget -= 1;
                     }
                 }
             }
@@ -316,11 +299,11 @@ fn boost_consensus(hints: &mut [GeoHint]) {
                 hints[i].confidence = (hints[i].confidence + 0.12).min(0.95);
                 hints[j].confidence = (hints[j].confidence + 0.12).min(0.95);
             } else if d > 500.0 {
-                // Discord: prefer non-geoip slightly by demoting plain geoip
-                if hints[i].source == "geoip" {
+                // Discord: slightly demote hosted vs rDNS/mmdb when far apart
+                if hints[i].source == "hosted" || hints[i].source == "geolite" {
                     hints[i].confidence = (hints[i].confidence - 0.08).max(0.2);
                 }
-                if hints[j].source == "geoip" {
+                if hints[j].source == "hosted" || hints[j].source == "geolite" {
                     hints[j].confidence = (hints[j].confidence - 0.08).max(0.2);
                 }
             }
@@ -439,71 +422,104 @@ fn is_public_global(ip: IpAddr) -> bool {
 }
 
 const USER_AGENT: &str = concat!(
-    "network-cartographer/",
+    "netcart/",
     env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/jonbng/network-cartographer)"
+    " (+https://mapmy.network)"
 );
+
+const DEFAULT_HOSTED_GEO_URL: &str = "https://mapmy.network/api/v1/geo";
 
 fn http_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(2))
-        .timeout_read(Duration::from_secs(4))
+        .timeout_read(Duration::from_secs(6))
         .user_agent(USER_AGENT)
         .build()
 }
 
-fn fetch_ip_api_batch(ips: &[IpAddr]) -> Option<Vec<(IpAddr, GeoHint)>> {
+fn hosted_geo_url() -> String {
+    std::env::var("NETWORK_CARTOGRAPHER_GEO_URL")
+        .or_else(|_| std::env::var("NETCART_GEO_URL"))
+        .unwrap_or_else(|_| DEFAULT_HOSTED_GEO_URL.to_string())
+}
+
+fn confidence_from_label(label: Option<&str>) -> f64 {
+    match label.map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("high") => 0.82,
+        Some("medium") => 0.74,
+        Some("low") => 0.55,
+        _ => 0.7,
+    }
+}
+
+fn fetch_hosted_geo(ips: &[IpAddr]) -> Option<Vec<(IpAddr, GeoHint)>> {
     if ips.is_empty() {
         return None;
     }
-    // Batch body: array of query strings
-    let body: Vec<serde_json::Value> = ips
-        .iter()
-        .map(|ip| serde_json::json!({ "query": ip.to_string() }))
-        .collect();
+    let url = hosted_geo_url();
+    let body = serde_json::json!({
+        "ips": ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
+    });
 
-    // Free ip-api.com batch endpoint is HTTP-only (HTTPS requires a paid plan).
-    // Prefer a local GeoLite2 MMDB (`NETWORK_CARTOGRAPHER_MMDB`) to avoid this path.
-    let agent = http_agent();
-    let resp = agent
-        .post("http://ip-api.com/batch?fields=status,countryCode,city,lat,lon,query")
+    let resp = match http_agent()
+        .post(&url)
         .set("Content-Type", "application/json")
         .set("User-Agent", USER_AGENT)
-        .send_json(serde_json::Value::Array(body.into_iter().collect()))
-        .ok()?;
-
-    let rows: Vec<IpApiResponse> = resp.into_json().ok()?;
-    let mut out = Vec::new();
-    for row in rows {
-        if row.status != "success" {
-            continue;
+        .set("Accept", "application/json")
+        .send_json(body)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[geo] hosted lookup failed: {e}");
+            return None;
         }
-        let lat = match row.lat {
+    };
+
+    if resp.status() >= 400 {
+        eprintln!("[geo] hosted lookup HTTP {}", resp.status());
+        return None;
+    }
+
+    let parsed: HostedGeoResponse = match resp.into_json() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[geo] hosted lookup decode failed: {e}");
+            return None;
+        }
+    };
+
+    let mut out = Vec::new();
+    for row in parsed.results {
+        let ip: IpAddr = match row.ip.parse() {
+            Ok(ip) => ip,
+            Err(_) => continue,
+        };
+        let lat = match row.latitude {
             Some(v) => v,
             None => continue,
         };
-        let lon = match row.lon {
+        let lon = match row.longitude {
             Some(v) => v,
             None => continue,
         };
         if lat == 0.0 && lon == 0.0 {
             continue;
         }
-        let ip: IpAddr = match row.query.as_deref().and_then(|q| q.parse().ok()) {
-            Some(ip) => ip,
-            None => continue,
-        };
         let city = match row.city.filter(|c| !c.is_empty()) {
             Some(c) => c,
-            None => continue, // country-only → middle-of-country junk
+            None => continue,
         };
+        let source = row
+            .source
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "hosted".into());
         let hint = GeoHint {
             city,
-            country: row.country_code.unwrap_or_default(),
+            country: row.country.unwrap_or_default(),
             lat,
             lon,
-            source: "geoip".into(),
-            confidence: 0.58,
+            source,
+            confidence: confidence_from_label(row.confidence.as_deref()),
         };
         if !is_usable_city_hint(&hint) {
             continue;
@@ -515,34 +531,6 @@ fn fetch_ip_api_batch(ips: &[IpAddr]) -> Option<Vec<(IpAddr, GeoHint)>> {
     } else {
         Some(out)
     }
-}
-
-fn fetch_ipwho(ip: IpAddr) -> Option<GeoHint> {
-    let url = format!("https://ipwho.is/{ip}");
-    let resp = http_agent()
-        .get(&url)
-        .set("User-Agent", USER_AGENT)
-        .call()
-        .ok()?;
-    let body: IpWhoResponse = resp.into_json().ok()?;
-    if body.success == Some(false) {
-        return None;
-    }
-    let lat = body.latitude?;
-    let lon = body.longitude?;
-    if lat == 0.0 && lon == 0.0 {
-        return None;
-    }
-    let city = body.city.filter(|c| !c.is_empty())?;
-    let hint = GeoHint {
-        city,
-        country: body.country_code.unwrap_or_default(),
-        lat,
-        lon,
-        source: "ipwho".into(),
-        confidence: 0.56,
-    };
-    is_usable_city_hint(&hint).then_some(hint)
 }
 
 impl Default for GeoCache {

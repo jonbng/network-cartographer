@@ -85,13 +85,14 @@ If a remote operational frontend is reconsidered later, it would require at mini
 
 ## Hosted geolocation
 
-The ideal default experience should not require users to download large GeoLite databases. The public Vercel project owns the API boundary for a future zero-setup geolocation service:
+The default experience should not require users to download large GeoLite databases. Architecture:
 
 ```text
-POST https://mapmy.network/api/v1/geo
+netcart → POST https://mapmy.network/api/v1/geo (Vercel: validate, rate-limit, cache)
+       → private VPS geo-service (GeoLite2 City + ASN MMDB, bearer auth)
 ```
 
-The CLI should send batches containing only public hop and destination IP addresses. It must never send process names, executable paths, ports, host connection graphs, or other local application metadata to this service.
+The CLI sends batches containing only public hop and destination IP addresses. It must never send process names, executable paths, ports, host connection graphs, or other local application metadata to this service.
 
 The response may contain:
 
@@ -108,7 +109,7 @@ The response may contain:
 - Batch requests and apply service-side rate limits.
 - Keep connection monitoring and process attribution entirely local.
 - Minimize or disable infrastructure request logging where practical.
-- Publish a clear retention policy.
+- Publish a clear retention policy (lookup results cached in memory up to 24h; bodies not persisted).
 - Keep local MMDB support as an optional offline/privacy mode.
 - Handle service failure gracefully; the network monitor must remain useful without geolocation.
 
@@ -118,7 +119,7 @@ The privacy promise should be phrased accurately:
 
 ### Licensing caveat
 
-Do not expose a GeoLite or commercial database through a public API until its license explicitly permits that use. Database redistribution and derived lookup services may be restricted. Before implementation, confirm the current provider terms or obtain a suitable commercial agreement. A licensed upstream GeoIP API may be safer than operating a public service directly from GeoLite data.
+Do not redistribute `.mmdb` files to end users. The VPS holds operator-obtained GeoLite databases and returns lookup results only. Confirm current GeoLite terms before public enablement.
 
 ## Product principles
 
@@ -137,5 +138,5 @@ Do not expose a GeoLite or commercial database through a public API until its li
 4. Create and test the first public GitHub Release so the one-command launchers work end to end.
 5. Configure the Vercel project with `site/` as its root and attach `mapmy.network`.
 6. Add a synthetic-data hosted demo.
-7. Research GeoIP licensing and operating cost before configuring the provider adapter.
-8. Add edge rate limiting and document the hosted geolocation retention policy and consent language before enabling it.
+7. ✅ Hosted geo path: VPS `geo-service` + Vercel proxy/cache/rate-limit + CLI client (confirm GeoLite terms before production traffic).
+8. Deploy VPS + set Vercel `GEO_PROVIDER_*` and attach `mapmy.network`.

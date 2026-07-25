@@ -9,7 +9,7 @@ If you replace this asset for redistribution, use a basemap with a clear public 
 - [NASA Blue Marble](https://visibleearth.nasa.gov/collection/1484/blue-marble) derivatives (NASA imagery; check current NASA media guidelines)
 - Other public-domain or Creative Commons equirectangular maps
 
-Do not redistribute MaxMind GeoLite2 databases with Map My Network; they have a separate license and must be obtained by each user (see `scripts/update-geolite2.sh`).
+Do not redistribute MaxMind GeoLite2 databases with Map My Network releases. Offline users may obtain their own copies (see `scripts/update-geolite2.sh`). The optional hosted geo path keeps operator-side databases on a private VPS and returns lookup results only — see `geo-service/` and `site/README.md`.
 
 ## Libraries
 
