@@ -2,7 +2,7 @@
 name = "mapmy-geo-service"
 version = "0.1.0"
 edition = "2021"
-description = "Private GeoLite2 lookup service for Map My Network hosted geo"
+description = "Private GeoLite2 lookup service for Network Cartographer hosted geo"
 license = "MIT"
 publish = false
 

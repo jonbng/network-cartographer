@@ -24,13 +24,13 @@ function mountPrivacyModal(onAccept: () => void | Promise<void>): void {
     <div class="modal-card">
       <h2 id="privacy-title">Privacy notice</h2>
       <p>
-        <strong>Map My Network</strong> monitors network connections <em>on this machine</em>.
-        Connection lists and process names stay local — they are not uploaded to a Map My Network server.
+        <strong>Network Cartographer</strong> monitors network connections <em>on this machine</em>.
+        Connection lists and process names stay local — they are not uploaded to a Network Cartographer server.
       </p>
       <ul>
         <li>
           For map placement, hop / destination <strong>public IP addresses</strong> may be sent to
-          Map My Network (<code>mapmy.network</code>) for geolocation unless you enable local-only
+          Network Cartographer (<code>mapmy.network</code>) for geolocation unless you enable local-only
           geo with a MaxMind GeoLite2 database.
         </li>
         <li>Connection lists and process names stay on this machine.</li>

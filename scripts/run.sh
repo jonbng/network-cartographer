@@ -1,5 +1,5 @@
 #!/bin/sh
-# Download the latest Map My Network release for this machine and run it.
+# Download the latest Network Cartographer release for this machine and run it.
 set -eu
 
 repository="jonbng/network-cartographer"
@@ -9,7 +9,7 @@ case "$(uname -s)" in
   Linux) platform="linux" ;;
   Darwin) platform="macos" ;;
   *)
-    printf '%s\n' "Map My Network supports Linux, macOS, and Windows." >&2
+    printf '%s\n' "Network Cartographer supports Linux, macOS, and Windows." >&2
     exit 1
     ;;
 esac
@@ -23,11 +23,11 @@ case "$(uname -m)" in
     ;;
 esac
 
-archive="map-my-network-${platform}-${architecture}.tar.gz"
-work_dir="$(mktemp -d "${TMPDIR:-/tmp}/map-my-network.XXXXXX")"
+archive="network-cartographer-${platform}-${architecture}.tar.gz"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/network-cartographer.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
 
-printf 'Downloading Map My Network for %s/%s…\n' "$platform" "$architecture"
+printf 'Downloading Network Cartographer for %s/%s…\n' "$platform" "$architecture"
 if command -v curl >/dev/null 2>&1; then
   download() { curl -fL --progress-bar "$1" -o "$2"; }
 elif command -v wget >/dev/null 2>&1; then
@@ -58,7 +58,7 @@ if [ "$actual_hash" != "$expected_hash" ]; then
 fi
 
 tar -xzf "${work_dir}/${archive}" -C "$work_dir"
-binary="${work_dir}/map-my-network-${platform}-${architecture}/netcart"
+binary="${work_dir}/network-cartographer-${platform}-${architecture}/netcart"
 if [ ! -f "$binary" ]; then
   printf '%s\n' "The downloaded release did not contain the expected binary." >&2
   exit 1

@@ -163,7 +163,7 @@ impl GeoCache {
         }
 
         if !local_only {
-            // Stage 2: Map My Network hosted geo (public hop IPs only)
+            // Stage 2: Network Cartographer hosted geo (public hop IPs only)
             let need_hosted: Vec<IpAddr> = todo
                 .iter()
                 .copied()

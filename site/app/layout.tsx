@@ -12,20 +12,20 @@ const mono = IBM_Plex_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://mapmy.network"),
-  title: "Map My Network",
+  title: "Network Cartographer",
   description:
     "Local CLI that maps per-app TCP connections and traceroute paths on a loopback globe UI. One command, no account.",
   openGraph: {
-    title: "Map My Network",
+    title: "Network Cartographer",
     description:
       "Local CLI: per-app TCP connections, traceroutes, loopback globe. No account. One command.",
     type: "website",
     url: "/",
-    siteName: "Map My Network",
+    siteName: "Network Cartographer",
   },
   twitter: {
     card: "summary",
-    title: "Map My Network",
+    title: "Network Cartographer",
     description:
       "Local CLI: per-app TCP connections, traceroutes, loopback globe. No account. One command.",
   },

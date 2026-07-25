@@ -1,4 +1,4 @@
-//! Private GeoLite2 City + ASN lookup service for Map My Network.
+//! Private GeoLite2 City + ASN lookup service for Network Cartographer.
 //!
 //! Intended to run on a VPS behind a bearer token. The public surface is
 //! `https://mapmy.network/api/v1/geo`, which proxies here after validation.

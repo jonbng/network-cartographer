@@ -81,7 +81,7 @@ pub async fn run() -> Result<(), String> {
         .map_err(|error| format!("could not read server address: {error}"))?;
     let url = format!("http://{address}");
 
-    println!("Map My Network is running at {url}");
+    println!("Network Cartographer is running at {url}");
     println!("Press Ctrl+C to stop.");
     if options.open_browser {
         if let Err(error) = webbrowser::open(&url) {
@@ -98,7 +98,7 @@ pub async fn run() -> Result<(), String> {
 
 async fn shutdown_signal(shutdown: broadcast::Sender<()>) {
     let _ = tokio::signal::ctrl_c().await;
-    println!("\nStopping Map My Network…");
+    println!("\nStopping Network Cartographer…");
     // Graceful shutdown waits for every response body to finish. Tell the
     // long-lived SSE response to close before asking Axum to drain connections.
     let _ = shutdown.send(());
@@ -362,7 +362,7 @@ impl Options {
                 }
                 "-h" | "--help" => {
                     println!(
-                        "Map My Network\n\nUSAGE:\n  netcart [--port PORT] [--no-open]\n\nOPTIONS:\n  --port PORT  Local port (default: 4769)\n  --no-open    Do not open the browser automatically\n  -h, --help   Show this help"
+                        "Network Cartographer\n\nUSAGE:\n  netcart [--port PORT] [--no-open]\n\nOPTIONS:\n  --port PORT  Local port (default: 4769)\n  --no-open    Do not open the browser automatically\n  -h, --help   Show this help"
                     );
                     std::process::exit(0);
                 }

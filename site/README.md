@@ -1,4 +1,4 @@
-# Map My Network website and public API
+# Network Cartographer website and public API
 
 This directory is an independent Next.js app for `mapmy.network`, designed to deploy on Vercel. It contains the product landing page, release launcher routes, and the public geolocation API that proxies to a private VPS GeoLite lookup service.
 

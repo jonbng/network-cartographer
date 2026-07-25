@@ -22,7 +22,7 @@ What you expected to happen.
 **Environment**
 
 - OS and version:
-- Map My Network version / commit:
+- Network Cartographer version / commit:
 - How you ran it (`npm start`, installed CLI, or release binary):
 
 **Logs / screenshots**

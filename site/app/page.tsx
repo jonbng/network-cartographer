@@ -6,7 +6,7 @@ export default function Home() {
     <main className="page">
       <section className="hero" aria-label="Overview">
         <div className="hero-top">
-          <p className="brand">Map My Network</p>
+          <p className="brand">Network Cartographer</p>
           <a
             className="star-button star-button-inline"
             href="https://github.com/jonbng/network-cartographer"
@@ -37,7 +37,7 @@ export default function Home() {
             <code>traceroute</code> / <code>tracepath</code> / <code>tracert</code>).
           </li>
           <li>
-            Geocode hops via Map My Network after consent, or keep lookups offline with a
+            Geocode hops via Network Cartographer after consent, or keep lookups offline with a
             local MaxMind database.
           </li>
           <li>

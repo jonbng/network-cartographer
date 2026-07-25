@@ -1,11 +1,11 @@
-# Map My Network
+# Network Cartographer
 
 A local command-line network monitor with a browser-based 3D globe. It shows which applications are talking to the internet, where they connect, and the routes traffic takes to each destination.
 
-The command binds only to `127.0.0.1`, opens your default browser, and stops when you press Ctrl+C. There is no desktop WebView, tray process, installer, remote Map My Network monitoring service, or privileged runtime mode.
+The command binds only to `127.0.0.1`, opens your default browser, and stops when you press Ctrl+C. There is no desktop WebView, tray process, installer, remote Network Cartographer monitoring service, or privileged runtime mode.
 
-[![CI](https://github.com/jonbng/network-cartographer/actions/workflows/ci.yml/badge.svg)](https://github.com/jonbng/network-cartographer/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[CI](https://github.com/jonbng/network-cartographer/actions/workflows/ci.yml)
+[License: MIT](./LICENSE)
 
 ## Try it now
 
@@ -130,13 +130,13 @@ The browser reads snapshots through a same-origin localhost API. Live updates us
 
 ## Traceroute behavior
 
-Map My Network never changes users or requests extra permissions. It uses normal-user probe modes only:
+Network Cartographer never changes users or requests extra permissions. It uses normal-user probe modes only:
 
-| OS | Probe method |
-|----|--------------|
-| Linux | UDP `traceroute`, then `tracepath` fallback |
-| macOS / BSD | UDP `traceroute` |
-| Windows | Built-in `tracert` |
+| OS          | Probe method                                |
+| ----------- | ------------------------------------------- |
+| Linux       | UDP `traceroute`, then `tracepath` fallback |
+| macOS / BSD | UDP `traceroute`                            |
+| Windows     | Built-in `tracert`                          |
 
 If no supported command is installed, connection monitoring still works and route entries report the traceroute error.
 
@@ -148,25 +148,23 @@ By default (after the privacy notice), `netcart` batches **public** hop and dest
 
 For fully offline lookups, enable **Local geolocation** and provide MaxMind databases:
 
-| Variable | Purpose |
-|----------|---------|
-| `NETWORK_CARTOGRAPHER_MMDB` | Absolute path to GeoLite2-City.mmdb |
-| `NETWORK_CARTOGRAPHER_ASN_MMDB` | Absolute path to GeoLite2-ASN.mmdb |
+| Variable                        | Purpose                             |
+| ------------------------------- | ----------------------------------- |
+| `NETWORK_CARTOGRAPHER_MMDB`     | Absolute path to GeoLite2-City.mmdb |
+| `NETWORK_CARTOGRAPHER_ASN_MMDB` | Absolute path to GeoLite2-ASN.mmdb  |
 
 Common locations include the project root, `data/`, the directory beside the binary, `~/.local/share/GeoIP/`, `~/Library/Application Support/GeoIP/`, and `%LOCALAPPDATA%\GeoIP\`.
 
-Do not commit MaxMind databases; they are ignored by Git and remain subject to MaxMind's license. Operators of the hosted service keep their own copies on a private VPS (see [`site/README.md`](./site/README.md) and [`geo-service/`](./geo-service/)).
+Do not commit MaxMind databases; they are ignored by Git and remain subject to MaxMind's license. Operators of the hosted service keep their own copies on a private VPS (see `[site/README.md](./site/README.md)` and `[geo-service/](./geo-service/)`).
 
 ## Privacy
 
 - Socket tables, process names, connection lists, and settings are handled locally.
 - The server binds only to `127.0.0.1`.
 - The browser UI and API are served by the CLI process.
-- After the first-run privacy notice, public hop and destination IPs may be sent to Map My Network for geolocation.
+- After the first-run privacy notice, public hop and destination IPs may be sent to Network Cartographer for geolocation.
 - Reverse DNS may query hostnames and airport codes.
 - Enable **Local geolocation** with a GeoLite2 database to avoid hosted lookups entirely.
-
-See [SECURITY.md](./SECURITY.md) for reporting guidance.
 
 ## Limitations
 
@@ -180,7 +178,3 @@ See [SECURITY.md](./SECURITY.md) for reporting guidance.
 ## License
 
 [MIT](./LICENSE) © Jonathan Bangert
-
-Earth texture and dependency attribution: [docs/ATTRIBUTIONS.md](./docs/ATTRIBUTIONS.md).
-
-See [CHANGELOG.md](./CHANGELOG.md) for release history.

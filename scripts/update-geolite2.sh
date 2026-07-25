@@ -40,7 +40,7 @@ download "GeoLite2-ASN" "${OUT}/GeoLite2-ASN.mmdb"
 cp -f "${OUT}/GeoLite2-City.mmdb" "${ROOT}/GeoLite2-City.mmdb" 2>/dev/null || true
 cp -f "${OUT}/GeoLite2-ASN.mmdb" "${ROOT}/GeoLite2-ASN.mmdb" 2>/dev/null || true
 
-echo "Done. Restart Map My Network (or the VPS geo-service) to load the databases."
+echo "Done. Restart Network Cartographer (or the VPS geo-service) to load the databases."
 echo "Optional: export NETWORK_CARTOGRAPHER_MMDB=${OUT}/GeoLite2-City.mmdb"
 echo "Optional: export NETWORK_CARTOGRAPHER_ASN_MMDB=${OUT}/GeoLite2-ASN.mmdb"
 echo "VPS operators: see geo-service/deploy/update-and-reload.sh for weekly refresh + /v1/reload."

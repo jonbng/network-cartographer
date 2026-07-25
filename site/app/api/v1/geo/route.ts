@@ -89,7 +89,7 @@ export async function POST(request: Request) {
 export function GET() {
   return NextResponse.json(
     {
-      service: "Map My Network Geo API",
+      service: "Network Cartographer Geo API",
       status: isGeoConfigured() ? "configured" : "unconfigured",
       privacy:
         "Only public IP address batches are accepted. IPs are used for geolocation lookup and short-lived caching; connection and process metadata are never accepted.",
