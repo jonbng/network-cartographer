@@ -7,12 +7,19 @@ const commands = {
   windows: "irm https://mapmy.network/run.ps1 | iex",
 } as const;
 
-const GITHUB_URL = "https://github.com/jonbng/network-cartographer";
-
 type Platform = keyof typeof commands;
 
+function detectPlatform(): Platform {
+  if (typeof navigator === "undefined") return "unix";
+
+  const platform = navigator.platform ?? "";
+  const ua = navigator.userAgent ?? "";
+  if (/win/i.test(platform) || /windows/i.test(ua)) return "windows";
+  return "unix";
+}
+
 export function CommandCard() {
-  const [platform, setPlatform] = useState<Platform>("unix");
+  const [platform, setPlatform] = useState<Platform>(detectPlatform);
   const [copied, setCopied] = useState(false);
 
   async function copyCommand() {
@@ -60,17 +67,8 @@ export function CommandCard() {
       </div>
 
       <p className="run-note">
-        Downloads a checksummed binary, runs locally, exits when you quit. No account.
+        Checksummed binary · runs locally · exits when you quit
       </p>
-
-      <a
-        className="star-button"
-        href={GITHUB_URL}
-        target="_blank"
-        rel="noopener noreferrer"
-      >
-        Star on GitHub
-      </a>
     </div>
   );
 }

@@ -75,6 +75,21 @@ export const DEMO_PATHS: DemoPath[] = [
       { ttl: 10, lat: 39.96, lon: -83.0, city: "Columbus", rttMs: 47 },
     ],
   },
+  {
+    id: "slack|wss|443",
+    app: "Slack",
+    host: "wss-primary.slack.com",
+    ip: "34.120.54.55",
+    port: 443,
+    color: "#c4a0b0",
+    rttMs: 54,
+    hops: [
+      { ttl: 1, lat: 18.47, lon: -66.11, city: "San Juan", rttMs: 2 },
+      { ttl: 4, lat: 25.76, lon: -80.19, city: "Miami", rttMs: 14 },
+      { ttl: 9, lat: 33.75, lon: -84.39, city: "Atlanta", rttMs: 28 },
+      { ttl: 14, lat: 37.42, lon: -122.08, city: "Mountain View", rttMs: 54 },
+    ],
+  },
 ];
 
 export const DEMO_APPS = ["Firefox", "Spotify", "Code", "Slack"] as const;

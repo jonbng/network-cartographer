@@ -16,6 +16,7 @@ type Arc = {
   endLng: number;
   color: string[];
   stroke: number;
+  animate: boolean;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -29,7 +30,7 @@ export type HeroGlobeHandle = {
 export async function mountHeroGlobe(
   container: HTMLElement,
   paths: DemoPath[],
-  options: { autoRotate: boolean },
+  options: { autoRotate: boolean; animateArcs: boolean },
 ): Promise<HeroGlobeHandle> {
   const Globe = (await import("globe.gl")).default;
 
@@ -37,38 +38,40 @@ export async function mountHeroGlobe(
     .backgroundColor("rgba(0,0,0,0)")
     .showAtmosphere(true)
     .atmosphereColor("#e0a86a")
-    .atmosphereAltitude(0.14)
+    .atmosphereAltitude(0.18)
     .globeImageUrl("/earth-dark.jpg")
-    .pointAltitude((d: object) => ((d as Point).isDestination ? 0.016 : 0.008))
+    .pointAltitude((d: object) => ((d as Point).isDestination ? 0.02 : 0.01))
     .pointRadius("size")
     .pointColor("color")
     .pointsMerge(false)
     .pointLabel((d: object) => {
       const p = d as Point;
-      return `<div style="font-family:ui-monospace,monospace;font-size:11px;padding:2px 0">${p.label}</div>`;
+      return `<div style="font-family:ui-monospace,monospace;font-size:11px;padding:2px 0;color:#ebe8e0">${p.label}</div>`;
     })
     .arcColor("color")
     .arcStroke("stroke")
-    .arcAltitudeAutoScale(0.28)
-    .arcDashLength(1)
-    .arcDashGap(0)
+    .arcAltitudeAutoScale(0.32)
+    .arcDashLength((d: object) => ((d as Arc).animate ? 0.35 : 1))
+    .arcDashGap((d: object) => ((d as Arc).animate ? 0.65 : 0))
+    .arcDashAnimateTime((d: object) => ((d as Arc).animate ? 2200 : 0))
     .arcsTransitionDuration(0)
     .pointsTransitionDuration(0)
     .labelsTransitionDuration(0);
 
   const controls = globe.controls();
   controls.autoRotate = options.autoRotate;
-  controls.autoRotateSpeed = 0.45;
+  controls.autoRotateSpeed = 0.55;
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.minDistance = 140;
-  controls.maxDistance = 600;
+  controls.minDistance = 120;
+  controls.maxDistance = 520;
   controls.enableZoom = true;
   controls.zoomSpeed = 0.7;
 
-  globe.pointOfView({ lat: 28, lng: -50, altitude: 2.05 }, 0);
+  // Frame the Atlantic / Americas where the demo routes live.
+  globe.pointOfView({ lat: 32, lng: -55, altitude: 1.55 }, 0);
 
-  const { points, arcs, labels } = buildGeometry(paths);
+  const { points, arcs, labels } = buildGeometry(paths, options.animateArcs);
   globe.pointsData(points);
   globe.arcsData(arcs);
   globe
@@ -76,11 +79,15 @@ export async function mountHeroGlobe(
     .labelLat("lat")
     .labelLng("lng")
     .labelText("label")
-    .labelSize(0.38)
+    .labelSize((d: object) => ((d as Point).isDestination ? 0.55 : 0.4))
     .labelDotRadius(0)
-    .labelColor(() => "rgba(235, 232, 224, 0.55)")
-    .labelAltitude(0.016)
-    .labelResolution(2);
+    .labelColor((d: object) =>
+      (d as Point).isDestination
+        ? "rgba(224, 168, 106, 0.9)"
+        : "rgba(235, 232, 224, 0.55)",
+    )
+    .labelAltitude(0.018)
+    .labelResolution(3);
 
   const resize = () => {
     const { width, height } = container.getBoundingClientRect();
@@ -111,7 +118,10 @@ export async function mountHeroGlobe(
   };
 }
 
-function buildGeometry(paths: DemoPath[]): {
+function buildGeometry(
+  paths: DemoPath[],
+  animateArcs: boolean,
+): {
   points: Point[];
   arcs: Arc[];
   labels: Point[];
@@ -130,7 +140,7 @@ function buildGeometry(paths: DemoPath[]): {
       if (existing) {
         if (isDestination) {
           existing.isDestination = true;
-          existing.size = Math.max(existing.size, 0.48);
+          existing.size = Math.max(existing.size, 0.62);
           existing.color = "#e0a86a";
           existing.label = hop.city;
         }
@@ -139,7 +149,7 @@ function buildGeometry(paths: DemoPath[]): {
       nodeMap.set(key, {
         lat: hop.lat,
         lng: hop.lon,
-        size: isDestination ? 0.48 : i === 0 ? 0.28 : 0.16,
+        size: isDestination ? 0.62 : i === 0 ? 0.38 : 0.22,
         color: isDestination ? "#e0a86a" : path.color,
         label: hop.city,
         isDestination,
@@ -158,7 +168,8 @@ function buildGeometry(paths: DemoPath[]): {
         color: isLast
           ? [path.color, "#e0a86a"]
           : [path.color, lighten(path.color, 0.12)],
-        stroke: isLast ? 0.5 : 0.32,
+        stroke: isLast ? 0.7 : 0.45,
+        animate: animateArcs,
       });
     }
   }
@@ -178,7 +189,7 @@ function pickLabels(points: Point[]): Point[] {
     if (!p.label || seen.has(p.label)) continue;
     seen.add(p.label);
     out.push(p);
-    if (out.length >= 8) break;
+    if (out.length >= 10) break;
   }
   return out;
 }

@@ -4,24 +4,33 @@ import { HeroGlobe } from "@/components/hero-globe";
 export default function Home() {
   return (
     <main className="page">
-      <header className="page-header">
-        <h1>Map My Network</h1>
-        <p className="tag">local CLI · open source</p>
-      </header>
+      <section className="hero" aria-label="Overview">
+        <div className="hero-top">
+          <p className="brand">Map My Network</p>
+          <a
+            className="star-button star-button-inline"
+            href="https://github.com/jonbng/network-cartographer"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Star on GitHub
+          </a>
+        </div>
 
-      <section className="section" aria-labelledby="what-heading">
-        <h2 id="what-heading">What it does</h2>
-        <p>
-          A local command that shows which apps on your machine open TCP connections, where
-          those connections go, and the traceroute path to each destination — plotted on a
-          globe UI served only on loopback.
+        <h1 className="hero-title">
+          See which apps on your machine talk to the internet — and the path each connection takes.
+        </h1>
+
+        <p className="hero-lede">
+          Local CLI. Per-app TCP map, traceroutes, globe UI on <code>127.0.0.1</code>. No account.
         </p>
-        <p className="muted">
-          No account. No installer. Data stays in the local process and goes away when you quit.
-        </p>
+
+        <CommandCard />
+
+        <HeroGlobe />
       </section>
 
-      <section className="section" aria-labelledby="how-heading">
+      <section className="section detail" aria-labelledby="how-heading">
         <h2 id="how-heading">How it works</h2>
         <ol className="steps">
           <li>Read the OS socket table and map each connection to its owning process.</li>
@@ -30,30 +39,17 @@ export default function Home() {
             <code>traceroute</code> / <code>tracepath</code> / <code>tracert</code>).
           </li>
           <li>
-            Geocode hops with a local MaxMind database; optional online lookup only after
-            explicit consent.
+            Geocode hops via Map My Network after consent, or keep lookups offline with a
+            local MaxMind database.
           </li>
           <li>
-            Serve the globe UI on <code>127.0.0.1</code> only. Connection data never leaves
-            your machine.
+            Serve the globe UI on <code>127.0.0.1</code> only. Connection and process data
+            stay on your machine.
           </li>
         </ol>
         <p className="muted">
           Limits: TCP focus. No HTTPS payload inspection. No cross-platform UDP peer map.
         </p>
-      </section>
-
-      <section className="section" aria-labelledby="run-heading">
-        <h2 id="run-heading">Run it</h2>
-        <CommandCard />
-      </section>
-
-      <section className="section globe-section" aria-labelledby="globe-heading">
-        <h2 id="globe-heading">Preview</h2>
-        <p className="muted">
-          Sample routes (not your machine). The real tool uses the same kind of hop geometry.
-        </p>
-        <HeroGlobe />
       </section>
 
       <footer className="page-footer">
