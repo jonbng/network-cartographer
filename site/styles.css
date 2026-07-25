@@ -80,11 +80,12 @@ code {
 
 .hero-title {
   margin: 0;
-  max-width: 18ch;
-  font-size: clamp(1.7rem, 4vw, 2.5rem);
+  max-width: 28rem;
+  font-size: clamp(1.55rem, 3.2vw, 2.15rem);
   font-weight: 500;
-  line-height: 1.15;
+  line-height: 1.2;
   letter-spacing: -0.02em;
+  text-wrap: balance;
 }
 
 .hero-lede {
@@ -280,20 +281,21 @@ code {
 
 .globe-block {
   margin: 0.5rem 0 0;
+  width: min(100%, 38rem);
 }
 
 .globe-shell {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 15rem;
+  grid-template-columns: minmax(0, 1fr) 13.5rem;
   border: 1px solid var(--line);
   background: #080909;
-  min-height: 18rem;
+  min-height: 21rem;
 }
 
 .globe-frame {
   position: relative;
-  min-height: 18rem;
-  height: 18rem;
+  min-height: 21rem;
+  height: 21rem;
   overflow: hidden;
   border-right: 1px solid var(--line);
 }
@@ -323,7 +325,7 @@ code {
 .globe-legend {
   padding: 0.75rem 0.8rem;
   overflow: auto;
-  max-height: 18rem;
+  max-height: 21rem;
 }
 
 .globe-legend-title {
@@ -409,9 +411,13 @@ code {
     min-height: 0;
   }
 
+  .globe-block {
+    width: 100%;
+  }
+
   .globe-frame {
-    min-height: 16rem;
-    height: 16rem;
+    min-height: 18rem;
+    height: 18rem;
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }
@@ -425,10 +431,6 @@ code {
   .page {
     width: min(100% - 1.25rem, 72rem);
     padding-top: 1.25rem;
-  }
-
-  .hero-title {
-    max-width: none;
   }
 
   .hero-top {
@@ -458,8 +460,8 @@ code {
   }
 
   .globe-frame {
-    min-height: 15rem;
-    height: 15rem;
+    min-height: 16rem;
+    height: 16rem;
   }
 }
 
