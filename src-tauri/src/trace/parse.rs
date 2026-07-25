@@ -113,14 +113,22 @@ fn parse_hop_line(line: &str) -> Option<Hop> {
             continue;
         }
 
-        // IP address
-        if let Ok(ip) = t.parse::<IpAddr>() {
+        // IP address. BSD traceroute6 can append an interface scope to
+        // link-local hops (for example, fe80::1%en0).
+        if let Some(ip) = parse_ip_token(t) {
             addr = Some(ip);
             i += 1;
             continue;
         }
 
         // RTT like "2.025" followed by "ms", or "2.025ms"
+        if i + 1 < tokens.len() && tokens[i + 1].eq_ignore_ascii_case("ms") {
+            if let Ok(ms_val) = t.parse::<f64>() {
+                rtts.push(ms_val);
+                i += 2;
+                continue;
+            }
+        }
         if let Some(ms_val) = parse_rtt_token(t) {
             rtts.push(ms_val);
             if i + 1 < tokens.len() && tokens[i + 1].eq_ignore_ascii_case("ms") {
@@ -143,7 +151,7 @@ fn parse_hop_line(line: &str) -> Option<Hop> {
     // If only timeouts after hop number
     if addr.is_none() && rtts.is_empty() {
         // Might be "* * *" already handled; otherwise treat as timeout hop
-        if tokens.iter().any(|t| *t == "*") {
+        if tokens.contains(&"*") {
             return Some(Hop {
                 ttl,
                 addr: None,
@@ -160,6 +168,14 @@ fn parse_hop_line(line: &str) -> Option<Hop> {
     };
 
     Some(Hop { ttl, addr, rtt_ms })
+}
+
+fn parse_ip_token(token: &str) -> Option<IpAddr> {
+    let token = token.trim_matches(|c| matches!(c, '(' | ')' | '[' | ']' | ','));
+    token.parse().ok().or_else(|| {
+        let (addr, _scope) = token.split_once('%')?;
+        addr.parse().ok()
+    })
 }
 
 fn parse_rtt_token(t: &str) -> Option<f64> {
@@ -243,6 +259,13 @@ traceroute to 1.1.1.1 (1.1.1.1), 20 hops max, 40 byte packets
         assert!(r.hops[0].rtt_ms.unwrap() > 1.0);
         assert!(r.hops[2].addr.is_none());
         assert_eq!(r.hops[3].addr, Some(target));
+    }
+
+    #[test]
+    fn parse_macos_integer_rtt_and_scoped_ipv6() {
+        let hop = parse_hop_line(" 1  fe80::1%en0  1 ms").unwrap();
+        assert_eq!(hop.addr, Some("fe80::1".parse().unwrap()));
+        assert_eq!(hop.rtt_ms, Some(1.0));
     }
 
     #[test]

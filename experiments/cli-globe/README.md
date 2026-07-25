@@ -1,10 +1,10 @@
-# hopglobe CLI experiment (terminal-native)
+# Network Cartographer CLI experiment (terminal-native)
 
-**No HTML. No WebView. No Carbonyl.** This is a separate crate under `experiments/` that does **not** modify hopglobe core source.
+**No HTML. No WebView. No Carbonyl.** This is a separate crate under `experiments/` that does **not** modify Network Cartographer core source.
 
 ## What this is testing
 
-Can we rebuild hopglobe’s *feel* as a **native TUI** that uses modern terminal capabilities?
+Can we rebuild Network Cartographer’s *feel* as a **native TUI** that uses modern terminal capabilities?
 
 | Layer | Approach |
 |-------|----------|
@@ -27,7 +27,7 @@ Modern terminal emulators are no longer character-only:
 For a live globe, the winning architecture is:
 
 ```
-Rust backend (reuse hopglobe collect/trace/geo later)
+Rust backend (reuse Network Cartographer collect/trace/geo later)
         │
         ▼
 Software or GPU offscreen globe → RGBA frame
@@ -54,9 +54,9 @@ Optional:
 
 ```bash
 # force backend
-HOPGLOBE_GFX=braille    cargo run --release   # default portable
-HOPGLOBE_GFX=halfblocks cargo run --release
-HOPGLOBE_GFX=kitty      cargo run --release   # needs Kitty/Ghostty/etc.
+NETWORK_CARTOGRAPHER_GFX=braille    cargo run --release   # default portable
+NETWORK_CARTOGRAPHER_GFX=halfblocks cargo run --release
+NETWORK_CARTOGRAPHER_GFX=kitty      cargo run --release   # needs Kitty/Ghostty/etc.
 
 # non-interactive smoke: write a PNG of one frame
 cargo run --release -- --dump-frame
@@ -84,9 +84,9 @@ cargo run --release -- --dump-frame
 | **kitty** | real pixels | Kitty / Ghostty; needs correct cell size |
 
 ```bash
-HOPGLOBE_GFX=braille cargo run --release
-HOPGLOBE_GFX=halfblocks cargo run --release
-HOPGLOBE_GFX=kitty cargo run --release
+NETWORK_CARTOGRAPHER_GFX=braille cargo run --release
+NETWORK_CARTOGRAPHER_GFX=halfblocks cargo run --release
+NETWORK_CARTOGRAPHER_GFX=kitty cargo run --release
 ```
 
 ### Rendering notes
@@ -98,7 +98,7 @@ HOPGLOBE_GFX=kitty cargo run --release
 
 ### Texture
 
-Uses `ui/public/earth-dark.jpg` from the main app (or set `HOPGLOBE_EARTH=/path/to.jpg`).
+Uses `ui/public/earth-dark.jpg` from the main app (or set `NETWORK_CARTOGRAPHER_EARTH=/path/to.jpg`).
 
 ## Recommended terminals
 
@@ -106,13 +106,13 @@ Uses `ui/public/earth-dark.jpg` from the main app (or set `HOPGLOBE_EARTH=/path/
 |----------|-----------|
 | **Kitty** | Kitty protocol (pixel) |
 | **Ghostty** | Kitty protocol |
-| **WezTerm** | iTerm2/Kitty (try `HOPGLOBE_GFX=kitty` or halfblocks) |
+| **WezTerm** | iTerm2/Kitty (try `NETWORK_CARTOGRAPHER_GFX=kitty` or halfblocks) |
 | **foot** | Sixel (wire via `ratatui-image` later) or halfblocks |
 | **Pretty much anything else** | Halfblocks (still looks good) |
 
 ## Next steps (if the experiment sticks)
 
-1. Wire **real** monitor snapshots (IPC to the Tauri/Rust core, or link `hopglobe` crates as a library).
+1. Wire **real** monitor snapshots (IPC to the Tauri/Rust core, or link Network Cartographer crates as a library).
 2. Swap the soft sphere for a faster path (SIMD, or offscreen `wgpu` → same framebuffer).
 3. Use `ratatui-image` + `ThreadProtocol` for automatic protocol detection and non-blocking encode.
 4. Braille mode for denser fallback (2×4 dots/cell).

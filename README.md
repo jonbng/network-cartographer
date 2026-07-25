@@ -1,10 +1,10 @@
-# hopglobe
+# Network Cartographer
 
 Desktop app ([Tauri 2](https://v2.tauri.app/)) that shows **which applications** on your machine talk to the internet, **where** they connect, and **traceroute paths** to each remote host — on a live 3D globe.
 
 Works on **Linux, macOS, and Windows**.
 
-[![CI](https://github.com/jonbng/hopglobe/actions/workflows/ci.yml/badge.svg)](https://github.com/jonbng/hopglobe/actions/workflows/ci.yml)
+[![CI](https://github.com/jonbng/network-cartographer/actions/workflows/ci.yml/badge.svg)](https://github.com/jonbng/network-cartographer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 ## Features
@@ -19,13 +19,13 @@ Works on **Linux, macOS, and Windows**.
 
 ## Screenshots
 
-![hopglobe UI preview](docs/screenshot.png)
+![Network Cartographer UI preview](docs/screenshot.png)
 
 *Live globe with per-app path colors, hop cities, and connection sidebar.*
 
 ## Install (prebuilt)
 
-Download the latest installer from **[GitHub Releases](https://github.com/jonbng/hopglobe/releases)**.
+Download the latest installer from **[GitHub Releases](https://github.com/jonbng/network-cartographer/releases)**.
 
 | Platform | Assets |
 |----------|--------|
@@ -57,7 +57,7 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
 **macOS**
 
 - Xcode Command Line Tools: `xcode-select --install`
-- `traceroute` is preinstalled (BSD flags; hopglobe does not use Linux-only options)
+- `traceroute` is preinstalled (BSD flags; Network Cartographer does not use Linux-only options)
 - See Tauri’s [macOS prerequisites](https://v2.tauri.app/start/prerequisites/#macos)
 
 **Windows**
@@ -117,12 +117,12 @@ Not 100% accurate — backbone GeoIP is often wrong. The app:
 6. Relocates implausible GeoIP hops (RTT too small / path oscillation)
 7. Caches full geolocated paths so UI snapshots stay cheap
 
-**Optional offline DB:** place `GeoLite2-City.mmdb` (and optional `GeoLite2-ASN.mmdb`) where hopglobe can find them, or set:
+**Optional offline DB:** place `GeoLite2-City.mmdb` (and optional `GeoLite2-ASN.mmdb`) where Network Cartographer can find them, or set:
 
 | Variable | Purpose |
 |----------|---------|
-| `HOPGLOBE_MMDB` | Absolute path to GeoLite2-City.mmdb |
-| `HOPGLOBE_ASN_MMDB` | Absolute path to GeoLite2-ASN.mmdb |
+| `NETWORK_CARTOGRAPHER_MMDB` | Absolute path to GeoLite2-City.mmdb |
+| `NETWORK_CARTOGRAPHER_ASN_MMDB` | Absolute path to GeoLite2-ASN.mmdb |
 
 With a MaxMind [license key](https://www.maxmind.com/en/accounts/current/license-key):
 
@@ -136,8 +136,8 @@ export MAXMIND_LICENSE_KEY=your_key
 | Project root or `data/` (cwd / next to binary) | all |
 | `~/.local/share/GeoIP/` | Linux (and other Unix) |
 | `/usr/share/GeoIP/` or `/var/lib/GeoIP/` | Linux |
-| `~/Library/Application Support/GeoIP/` or `…/hopglobe/` | macOS |
-| `%LOCALAPPDATA%\GeoIP\` or `%LOCALAPPDATA%\hopglobe\` | Windows |
+| `~/Library/Application Support/GeoIP/` or `…/network-cartographer/` | macOS |
+| `%LOCALAPPDATA%\GeoIP\` or `%LOCALAPPDATA%\network-cartographer\` | Windows |
 | `%USERPROFILE%\GeoLite2-City.mmdb` | Windows |
 
 Do **not** commit MaxMind databases (they are gitignored; check MaxMind’s license).
@@ -165,7 +165,7 @@ Process names and privileged traceroute methods work better elevated:
 ## Privacy
 
 - Monitoring is **local**: the app reads OS socket tables and process metadata on your machine.
-- Connection lists and process names are **not** uploaded to a hopglobe backend.
+- Connection lists and process names are **not** uploaded to a Network Cartographer backend.
 - For map placement, **IP addresses** (hop / destination) may be sent to third-party GeoIP APIs (`ip-api.com`, `ipwho.is`) and reverse DNS may be queried.
 - Free **ip-api.com** batch lookups use **HTTP** (not HTTPS); prefer a local GeoLite2 MMDB to avoid that path.
 - Use a local GeoLite2 MMDB and/or the **Local geo** toggle to reduce or avoid online GeoIP calls.

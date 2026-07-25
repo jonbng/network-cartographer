@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::dto::SnapshotDto;
 
 fn dir() -> Option<PathBuf> {
-    let d = dirs::data_local_dir()?.join("hopglobe").join("history");
+    let d = dirs::data_local_dir()?.join("network-cartographer").join("history");
     let _ = fs::create_dir_all(&d);
     Some(d)
 }

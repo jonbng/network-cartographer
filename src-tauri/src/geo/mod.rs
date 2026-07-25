@@ -5,7 +5,7 @@ mod lookup;
 mod path_cache;
 mod rdns;
 
-pub use asn::{AsnDb, AsnInfo};
+pub use asn::AsnDb;
 pub use infer::{pending_ips, GeoHop};
 pub use lookup::GeoCache;
 pub use path_cache::PathGeoCache;

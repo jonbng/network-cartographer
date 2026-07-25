@@ -1296,27 +1296,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hopglobe"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "dns-lookup",
- "libc",
- "maxminddb",
- "netstat2",
- "parking_lot",
- "serde",
- "serde_json",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-shell",
- "thiserror 2.0.19",
- "ureq",
-]
-
-[[package]]
 name = "html5ever"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2013,6 +1992,27 @@ dependencies = [
  "num-derive",
  "num-traits",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "network-cartographer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "dns-lookup",
+ "libc",
+ "maxminddb",
+ "netstat2",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-shell",
+ "thiserror 2.0.19",
+ "ureq",
 ]
 
 [[package]]

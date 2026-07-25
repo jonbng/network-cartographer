@@ -138,6 +138,15 @@ pub struct PathChangedEvent {
     pub summary: String,
 }
 
+struct DtoContext<'a> {
+    traces: &'a TraceEngine,
+    geo: &'a GeoCache,
+    path_geo: &'a PathGeoCache,
+    asn: &'a AsnDb,
+    settings: &'a SettingsDto,
+    path_changed: &'a std::collections::HashSet<String>,
+}
+
 pub fn build_snapshot(
     state: &AppState,
     traces: &TraceEngine,
@@ -148,10 +157,18 @@ pub fn build_snapshot(
     path_changed: &std::collections::HashSet<String>,
 ) -> SnapshotDto {
     let ts = traces.stats();
+    let context = DtoContext {
+        traces,
+        geo,
+        path_geo,
+        asn,
+        settings,
+        path_changed,
+    };
     let apps: Vec<AppDto> = state
         .sorted_apps()
         .into_iter()
-        .map(|app| app_to_dto(app, traces, geo, path_geo, asn, settings, path_changed))
+        .map(|app| app_to_dto(app, &context))
         .collect();
 
     SnapshotDto {
@@ -178,19 +195,11 @@ pub fn build_snapshot(
     }
 }
 
-fn app_to_dto(
-    app: &AppEntry,
-    traces: &TraceEngine,
-    geo: &GeoCache,
-    path_geo: &PathGeoCache,
-    asn: &AsnDb,
-    settings: &SettingsDto,
-    path_changed: &std::collections::HashSet<String>,
-) -> AppDto {
+fn app_to_dto(app: &AppEntry, context: &DtoContext<'_>) -> AppDto {
     let destinations: Vec<DestDto> = app
         .sorted_destinations()
         .into_iter()
-        .map(|d| dest_to_dto(app, d, traces, geo, path_geo, asn, settings, path_changed))
+        .map(|d| dest_to_dto(app, d, context))
         .collect();
 
     let name = display_name_for(app);
@@ -216,16 +225,11 @@ fn app_to_dto(
 fn dest_to_dto(
     app: &AppEntry,
     d: &DestStats,
-    traces: &TraceEngine,
-    geo: &GeoCache,
-    path_geo: &PathGeoCache,
-    asn: &AsnDb,
-    settings: &SettingsDto,
-    path_changed: &std::collections::HashSet<String>,
+    context: &DtoContext<'_>,
 ) -> DestDto {
-    let status = traces.get(d.remote.ip());
+    let status = context.traces.get(d.remote.ip());
     let ip = d.remote.ip();
-    let asn_info = asn.lookup(ip);
+    let asn_info = context.asn.lookup(ip);
     let display_host = display_host_for(d);
     let change_key = format!("{}|{}", display_name_for(app), ip);
     DestDto {
@@ -239,8 +243,14 @@ fn dest_to_dto(
         sni: d.sni.clone(),
         asn: asn_info.as_ref().map(|a| a.asn),
         org: asn_info.map(|a| a.org),
-        path_changed: path_changed.contains(&change_key),
-        trace: trace_to_dto(status, geo, path_geo, asn, settings),
+        path_changed: context.path_changed.contains(&change_key),
+        trace: trace_to_dto(
+            status,
+            context.geo,
+            context.path_geo,
+            context.asn,
+            context.settings,
+        ),
     }
 }
 
@@ -388,8 +398,10 @@ mod tests {
 
     #[test]
     fn settings_roundtrip_privacy() {
-        let mut s = SettingsDto::default();
-        s.privacy_accepted = true;
+        let s = SettingsDto {
+            privacy_accepted: true,
+            ..SettingsDto::default()
+        };
         let raw = serde_json::to_string(&s).unwrap();
         let back: SettingsDto = serde_json::from_str(&raw).unwrap();
         assert!(back.privacy_accepted);

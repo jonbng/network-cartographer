@@ -30,16 +30,6 @@ impl SniCache {
         }
     }
 
-    pub fn get(&self, ip: IpAddr) -> Option<String> {
-        let mut m = self.map.lock().ok()?;
-        let e = m.get(&ip)?;
-        if e.at.elapsed() > self.ttl {
-            m.remove(&ip);
-            return None;
-        }
-        Some(e.sni.clone())
-    }
-
     /// Apply known SNI onto destinations that match remote IPs.
     pub fn apply_to_state(&self, state: &mut crate::model::AppState) {
         let Ok(m) = self.map.lock() else {

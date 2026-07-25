@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "hopglobe",
+  "productName": "Network Cartographer",
   "version": "0.1.0",
-  "identifier": "com.hopglobe.desktop",
+  "identifier": "com.network-cartographer.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "hopglobe",
+        "title": "Network Cartographer",
         "width": 1280,
         "height": 820,
         "minWidth": 900,
@@ -29,13 +29,13 @@
     "targets": "all",
     "category": "Utility",
     "shortDescription": "See which apps talk to the internet on a 3D globe",
-    "longDescription": "hopglobe is a desktop app that shows which applications on your machine talk to the internet, where they connect, and traceroute paths to each remote host — visualized on a live 3D globe. Monitoring is local; optional GeoIP lookups may contact third-party APIs unless you use a local MaxMind database.",
+    "longDescription": "Network Cartographer is a desktop app that shows which applications on your machine talk to the internet, where they connect, and traceroute paths to each remote host — visualized on a live 3D globe. Monitoring is local; optional GeoIP lookups may contact third-party APIs unless you use a local MaxMind database.",
     "copyright": "Copyright © 2026 Jonathan Bangert",
-    "homepage": "https://github.com/jonbng/hopglobe",
+    "homepage": "https://github.com/jonbng/network-cartographer",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
-      "icons/henry.w@example.net",
+      "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico",
       "icons/icon.png"

@@ -170,25 +170,6 @@ impl AppState {
         list
     }
 
-    pub fn filtered_apps(&self, filter: &str) -> Vec<&AppEntry> {
-        let filter = filter.trim().to_lowercase();
-        if filter.is_empty() {
-            return self.sorted_apps();
-        }
-        self.sorted_apps()
-            .into_iter()
-            .filter(|app| {
-                if app.name.to_lowercase().contains(&filter) {
-                    return true;
-                }
-                app.destinations.values().any(|d| {
-                    d.display_host().to_lowercase().contains(&filter)
-                        || d.remote.ip().to_string().contains(&filter)
-                })
-            })
-            .collect()
-    }
-
     pub fn total_destinations(&self) -> usize {
         self.apps.values().map(|a| a.destinations.len()).sum()
     }

@@ -6,7 +6,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
-    <title>HopGlobe</title>
+    <title>Network Cartographer</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -19,9 +19,9 @@
 
       <header class="overlay header">
         <div class="brand">
-          <span class="logo">HG</span>
+          <span class="logo">NC</span>
           <div>
-            <h1>HopGlobe</h1>
+            <h1>Network Cartographer</h1>
             <p class="subtitle" id="globe-status">All traceroutes · waiting…</p>
           </div>
         </div>
@@ -98,7 +98,7 @@
       <footer class="overlay footer">
         <span id="status-msg">Starting monitor…</span>
         <span class="hint">
-          <span id="app-version" class="version" title="hopglobe version">v…</span>
+          <span id="app-version" class="version" title="Network Cartographer version">v…</span>
           · Drag orbit · scroll zoom · click hop → app ·
           <button type="button" id="btn-about" class="linkish">About / privacy</button>
         </span>
@@ -106,7 +106,7 @@
 
       <div id="about-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="about-title">
         <div class="modal-card">
-          <h2 id="about-title">About hopglobe</h2>
+          <h2 id="about-title">About Network Cartographer</h2>
           <p id="about-version">Version …</p>
           <p>
             Live per-application network monitor with traceroute paths on a 3D globe.
@@ -114,15 +114,15 @@
           </p>
           <p class="modal-note">
             Source, issues, and security reports:
-            <a href="https://github.com/jonbng/hopglobe" target="_blank" rel="noopener noreferrer"
-              >github.com/jonbng/hopglobe</a
+            <a href="https://github.com/jonbng/network-cartographer" target="_blank" rel="noopener noreferrer"
+              >github.com/jonbng/network-cartographer</a
             >
           </p>
           <h3>Privacy summary</h3>
           <ul>
             <li>Monitoring is local (OS socket tables + process metadata).</li>
             <li>Optional online GeoIP may send IP addresses to third parties.</li>
-            <li>Use a local GeoLite2 MMDB (<code>HOPGLOBE_MMDB</code>) to reduce or avoid online GeoIP.</li>
+            <li>Use a local GeoLite2 MMDB (<code>NETWORK_CARTOGRAPHER_MMDB</code>) to reduce or avoid online GeoIP.</li>
             <li>Free ip-api.com batch lookups use HTTP only (HTTPS is a paid plan).</li>
           </ul>
           <div class="modal-actions">

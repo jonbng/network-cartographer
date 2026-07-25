@@ -63,7 +63,6 @@ pub struct GeoCache {
     ttl: Duration,
     /// Optional MaxMind GeoLite2-City.mmdb (kept open for fast lookups).
     mmdb: Option<maxminddb::Reader<Vec<u8>>>,
-    mmdb_path: Option<PathBuf>,
 }
 
 impl GeoCache {
@@ -91,7 +90,6 @@ impl GeoCache {
             map: Mutex::new(HashMap::new()),
             ttl: Duration::from_secs(6 * 3600),
             mmdb,
-            mmdb_path,
         }
     }
 
@@ -114,16 +112,8 @@ impl GeoCache {
         }
     }
 
-    pub fn set_local_only(&self, _local: bool) {
-        // resolved via settings at call sites of resolve_batch
-    }
-
     pub fn mmdb_loaded(&self) -> bool {
         self.mmdb.is_some()
-    }
-
-    pub fn mmdb_path_display(&self) -> Option<String> {
-        self.mmdb_path.as_ref().map(|p| p.display().to_string())
     }
 
     pub fn get(&self, ip: IpAddr) -> Option<IpMeta> {
@@ -138,11 +128,6 @@ impl GeoCache {
             None => true,
             Some(m) => !m.ready || m.at.elapsed() >= self.ttl,
         }
-    }
-
-    /// Resolve a single IP (blocking). Prefer `resolve_batch` when possible.
-    pub fn resolve(&self, ip: IpAddr) {
-        self.resolve_batch(&[ip], false);
     }
 
     /// Resolve many IPs: rDNS + mmdb, optional online sources.
@@ -355,7 +340,7 @@ fn find_mmdb() -> Option<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
 
     // Explicit override
-    if let Ok(p) = std::env::var("HOPGLOBE_MMDB") {
+    if let Ok(p) = std::env::var("NETWORK_CARTOGRAPHER_MMDB") {
         paths.push(PathBuf::from(p));
     }
 
@@ -396,7 +381,7 @@ fn find_mmdb() -> Option<PathBuf> {
                     home.join("Library/Application Support/GeoIP/GeoLite2-City.mmdb"),
                 );
                 paths.push(
-                    home.join("Library/Application Support/hopglobe/GeoLite2-City.mmdb"),
+                    home.join("Library/Application Support/network-cartographer/GeoLite2-City.mmdb"),
                 );
             }
         }
@@ -409,7 +394,7 @@ fn find_mmdb() -> Option<PathBuf> {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             let local = PathBuf::from(local);
             paths.push(local.join("GeoIP").join("GeoLite2-City.mmdb"));
-            paths.push(local.join("hopglobe").join("GeoLite2-City.mmdb"));
+            paths.push(local.join("network-cartographer").join("GeoLite2-City.mmdb"));
         }
         if let Ok(profile) = std::env::var("USERPROFILE") {
             paths.push(PathBuf::from(profile).join("GeoLite2-City.mmdb"));
@@ -449,7 +434,7 @@ fn is_public_global(ip: IpAddr) -> bool {
     }
 }
 
-const USER_AGENT: &str = concat!("hopglobe/", env!("CARGO_PKG_VERSION"), " (+https://github.com/jonbng/hopglobe)");
+const USER_AGENT: &str = concat!("network-cartographer/", env!("CARGO_PKG_VERSION"), " (+https://github.com/jonbng/network-cartographer)");
 
 fn http_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
@@ -470,7 +455,7 @@ fn fetch_ip_api_batch(ips: &[IpAddr]) -> Option<Vec<(IpAddr, GeoHint)>> {
         .collect();
 
     // Free ip-api.com batch endpoint is HTTP-only (HTTPS requires a paid plan).
-    // Prefer a local GeoLite2 MMDB (`HOPGLOBE_MMDB`) to avoid this path.
+    // Prefer a local GeoLite2 MMDB (`NETWORK_CARTOGRAPHER_MMDB`) to avoid this path.
     let agent = http_agent();
     let resp = agent
         .post("http://ip-api.com/batch?fields=status,countryCode,city,lat,lon,query")

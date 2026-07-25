@@ -12,7 +12,7 @@ use tauri::{
 use crate::monitor::Monitor;
 
 pub fn setup<R: Runtime>(app: &AppHandle<R>, monitor: Arc<Monitor>) -> Result<(), String> {
-    let show_i = MenuItem::with_id(app, "show", "Show hopglobe", true, None::<&str>)
+    let show_i = MenuItem::with_id(app, "show", "Show Network Cartographer", true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let quit_i =
         MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).map_err(|e| e.to_string())?;
@@ -22,7 +22,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>, monitor: Arc<Monitor>) -> Result<()
     let tray = TrayIconBuilder::new()
         .icon(app.default_window_icon().cloned().ok_or("no icon")?)
         .menu(&menu)
-        .tooltip("hopglobe")
+        .tooltip("Network Cartographer")
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "quit" => app.exit(0),
             "show" => {
@@ -57,7 +57,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>, monitor: Arc<Monitor>) -> Result<()
         std::thread::sleep(std::time::Duration::from_secs(5));
         let snap = mon.snapshot();
         let tip = format!(
-            "hopglobe · {} apps · {} dests",
+            "Network Cartographer · {} apps · {} dests",
             snap.app_count, snap.dest_count
         );
         if let Ok(t) = tray_h.lock() {

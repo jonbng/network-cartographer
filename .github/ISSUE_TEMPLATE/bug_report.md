@@ -22,7 +22,7 @@ What you expected to happen.
 **Environment**
 
 - OS and version:
-- hopglobe version / commit:
+- Network Cartographer version / commit:
 - How you ran it (`tauri dev`, installed package, with/without sudo):
 
 **Logs / screenshots**

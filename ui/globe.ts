@@ -109,7 +109,14 @@ export function setFocusedApp(app: string | null) {
 }
 
 export function setFocusedApps(apps: string[]) {
-  focusedApps = new Set(apps);
+  const next = new Set(apps);
+  if (
+    next.size === focusedApps.size &&
+    [...next].every((app) => focusedApps.has(app))
+  ) {
+    return;
+  }
+  focusedApps = next;
   lastKey = "";
 }
 

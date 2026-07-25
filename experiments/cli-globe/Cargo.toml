@@ -1,8 +1,8 @@
 [package]
-name = "hopglobe-cli"
+name = "network-cartographer-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Terminal-native hopglobe experiment (globe + TUI chrome, no HTML)"
+description = "Terminal-native Network Cartographer experiment (globe + TUI chrome, no HTML)"
 publish = false
 
 [dependencies]

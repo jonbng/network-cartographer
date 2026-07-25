@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea for hopglobe
+about: Suggest an idea for Network Cartographer
 title: ""
 labels: enhancement
 assignees: ""

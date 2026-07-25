@@ -1,17 +1,17 @@
 [package]
-name = "hopglobe"
+name = "network-cartographer"
 version = "0.1.0"
 description = "Live per-application network connection monitor with traceroute and globe visualization"
 authors = ["Jonathan Bangert <jonathan@bangert.dk>"]
 license = "MIT"
 edition = "2021"
 rust-version = "1.88"
-repository = "https://github.com/jonbng/hopglobe"
+repository = "https://github.com/jonbng/network-cartographer"
 readme = "../README.md"
 
 
 [lib]
-name = "hopglobe_lib"
+name = "network_cartographer_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

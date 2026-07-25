@@ -19,9 +19,11 @@ pub struct Monitor {
     pub state: Mutex<AppState>,
     pub hostnames: Mutex<HostnameCache>,
     pub traces: Mutex<TraceEngine>,
-    pub geo: Mutex<GeoCache>,
-    pub path_geo: Mutex<PathGeoCache>,
-    pub asn: Mutex<AsnDb>,
+    // These types provide their own interior synchronization. Keeping another
+    // mutex around them made every snapshot wait for slow GeoIP HTTP calls.
+    pub geo: GeoCache,
+    pub path_geo: PathGeoCache,
+    pub asn: AsnDb,
     pub settings: Mutex<SettingsDto>,
     /// Best-effort TLS SNI map (fed via `record_sni` / future pcap).
     pub sni: SniCache,
@@ -52,9 +54,9 @@ impl Monitor {
             )),
             hostnames: Mutex::new(HostnameCache::new()),
             traces: Mutex::new(TraceEngine::new(trace_cfg)),
-            geo: Mutex::new(GeoCache::new()),
-            path_geo: Mutex::new(PathGeoCache::new()),
-            asn: Mutex::new(AsnDb::new()),
+            geo: GeoCache::new(),
+            path_geo: PathGeoCache::new(),
+            asn: AsnDb::new(),
             settings: Mutex::new(settings),
             sni: SniCache::new(),
             path_fps: Mutex::new(HashMap::new()),
@@ -64,6 +66,11 @@ impl Monitor {
 
     pub fn tick(&self) -> Result<SnapshotDto, String> {
         let settings = self.settings.lock().clone();
+        // The first-run notice promises that monitoring and external lookups do
+        // not start until the user accepts it.
+        if !settings.privacy_accepted {
+            return Ok(self.snapshot());
+        }
         {
             let mut state = self.state.lock();
             state.external_only = settings.external_only;
@@ -97,39 +104,40 @@ impl Monitor {
     }
 
     pub fn snapshot(&self) -> SnapshotDto {
-        {
-            let mut traces = self.traces.lock();
-            traces.poll();
-        }
+        // Keep the same traces -> state lock order used by tick(),
+        // pending_geo_ips(), and detect_path_changes().
+        let mut traces = self.traces.lock();
+        traces.poll();
         let state = self.state.lock();
-        let traces = self.traces.lock();
-        let geo = self.geo.lock();
-        let path_geo = self.path_geo.lock();
-        let asn = self.asn.lock();
         let settings = self.settings.lock().clone();
         let changed = self.path_changed.lock().clone();
         build_snapshot(
             &state,
             &traces,
-            &geo,
-            &path_geo,
-            &asn,
+            &self.geo,
+            &self.path_geo,
+            &self.asn,
             &settings,
             &changed,
         )
     }
 
     pub fn apply_settings(&self, settings: SettingsDto) {
-        let mut s = self.settings.lock();
-        let traces_changed = s.traces_enabled != settings.traces_enabled;
-        *s = settings.clone();
+        let traces_changed = {
+            let mut current = self.settings.lock();
+            let changed = current.traces_enabled != settings.traces_enabled;
+            *current = settings.clone();
+            changed
+        };
         let _ = settings_store::save(&settings);
-        let mut state = self.state.lock();
-        state.external_only = s.external_only;
-        state.include_udp = s.include_udp;
+        {
+            let mut state = self.state.lock();
+            state.external_only = settings.external_only;
+            state.include_udp = settings.include_udp;
+        }
         if traces_changed {
             let cfg = TraceConfig {
-                enabled: s.traces_enabled,
+                enabled: settings.traces_enabled,
                 max_concurrent: 6,
                 cache_ttl: Duration::from_secs(900),
                 max_hops: 20,
@@ -137,31 +145,30 @@ impl Monitor {
                 skip_private: true,
             };
             *self.traces.lock() = TraceEngine::new(cfg);
-            self.path_geo.lock().clear();
+            self.path_geo.clear();
         }
     }
 
     pub fn reset(&self) {
         self.state.lock().reset();
         self.traces.lock().clear_cache();
-        self.path_geo.lock().clear();
+        self.path_geo.clear();
         self.path_fps.lock().clear();
         self.path_changed.lock().clear();
     }
 
     pub fn pending_geo_ips(&self) -> Vec<IpAddr> {
         let traces = self.traces.lock();
-        let geo = self.geo.lock();
         let state = self.state.lock();
         let mut set = HashSet::new();
 
         for app in state.sorted_apps() {
             for dest in app.destinations.values() {
                 if let TraceStatus::Done(r) = traces.get(dest.remote.ip()) {
-                    for ip in pending_ips(&r.hops, &geo) {
+                    for ip in pending_ips(&r.hops, &self.geo) {
                         set.insert(ip);
                     }
-                    if geo.needs_resolve(dest.remote.ip()) {
+                    if self.geo.needs_resolve(dest.remote.ip()) {
                         set.insert(dest.remote.ip());
                     }
                 }
@@ -240,15 +247,19 @@ pub fn spawn_poll_loop(app: AppHandle, monitor: Arc<Monitor>) {
         thread::Builder::new()
             .name("geo-warm".into())
             .spawn(move || loop {
+                let settings = mon.settings.lock().clone();
+                if !settings.privacy_accepted {
+                    thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
                 let pending = mon.pending_geo_ips();
                 if pending.is_empty() {
                     thread::sleep(Duration::from_secs(2));
                     continue;
                 }
-                let local_only = mon.settings.lock().geo_local_only;
                 let batch: Vec<IpAddr> = pending.into_iter().take(40).collect();
-                mon.geo.lock().resolve_batch(&batch, local_only);
-                mon.path_geo.lock().clear();
+                mon.geo.resolve_batch(&batch, settings.geo_local_only);
+                mon.path_geo.clear();
                 thread::sleep(Duration::from_millis(600));
             })
             .expect("spawn geo warmer");

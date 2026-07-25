@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::dto::SettingsDto;
 
 fn path() -> Option<PathBuf> {
-    let dir = dirs::config_dir()?.join("hopglobe");
+    let dir = dirs::config_dir()?.join("network-cartographer");
     let _ = fs::create_dir_all(&dir);
     Some(dir.join("settings.json"))
 }

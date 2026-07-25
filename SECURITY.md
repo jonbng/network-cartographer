@@ -6,11 +6,11 @@
 |---------|-----------|
 | 0.1.x   | Yes       |
 
-## What hopglobe does
+## What Network Cartographer does
 
-hopglobe is a **local** network connection monitor. It reads OS socket tables and process metadata, runs traceroute tools, and may send **IP addresses** to third-party GeoIP APIs unless a local MaxMind database is configured.
+Network Cartographer is a **local** network connection monitor. It reads OS socket tables and process metadata, runs traceroute tools, and may send **IP addresses** to third-party GeoIP APIs unless a local MaxMind database is configured.
 
-It does **not** operate a hopglobe backend that receives your connection lists or process names.
+It does **not** operate a Network Cartographer backend that receives your connection lists or process names.
 
 ## Reporting a vulnerability
 
@@ -18,7 +18,7 @@ Please **do not** open a public GitHub issue for security-sensitive reports.
 
 Prefer one of:
 
-1. **GitHub Security Advisories** on [jonbng/hopglobe](https://github.com/jonbng/hopglobe/security/advisories/new) (private report), or
+1. **GitHub Security Advisories** on [jonbng/network-cartographer](https://github.com/jonbng/network-cartographer/security/advisories/new) (private report), or
 2. Email the maintainer listed in `Cargo.toml` / GitHub profile.
 
 Include:
@@ -48,6 +48,6 @@ You should receive an acknowledgment within a few days when possible. We will co
 
 ## Hardening tips for users
 
-- Prefer a local GeoLite2 City (and optional ASN) database: set `HOPGLOBE_MMDB` / `HOPGLOBE_ASN_MMDB` or place files under standard GeoIP paths (see README)
+- Prefer a local GeoLite2 City (and optional ASN) database: set `NETWORK_CARTOGRAPHER_MMDB` / `NETWORK_CARTOGRAPHER_ASN_MMDB` or place files under standard GeoIP paths (see README)
 - Enable **Local geo** in the UI when an MMDB is available to reduce online lookups
 - Run elevated only when needed (process attribution / privileged traceroute methods)

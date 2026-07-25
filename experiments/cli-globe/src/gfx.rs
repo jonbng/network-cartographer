@@ -22,7 +22,7 @@ pub enum GfxBackend {
 
 impl GfxBackend {
     pub fn detect() -> Self {
-        if let Ok(v) = std::env::var("HOPGLOBE_GFX") {
+        if let Ok(v) = std::env::var("NETWORK_CARTOGRAPHER_GFX") {
             return match v.to_ascii_lowercase().as_str() {
                 "kitty" | "kgp" => GfxBackend::Kitty,
                 "braille" | "brl" | "dots" => GfxBackend::Braille,

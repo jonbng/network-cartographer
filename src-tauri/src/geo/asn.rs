@@ -14,7 +14,6 @@ pub struct AsnInfo {
 
 pub struct AsnDb {
     reader: Option<maxminddb::Reader<Vec<u8>>>,
-    path: Option<PathBuf>,
     cache: Mutex<std::collections::HashMap<IpAddr, Option<AsnInfo>>>,
 }
 
@@ -38,17 +37,12 @@ impl AsnDb {
         }
         Self {
             reader,
-            path,
             cache: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
     pub fn loaded(&self) -> bool {
         self.reader.is_some()
-    }
-
-    pub fn path_display(&self) -> Option<String> {
-        self.path.as_ref().map(|p| p.display().to_string())
     }
 
     pub fn lookup(&self, ip: IpAddr) -> Option<AsnInfo> {
@@ -93,11 +87,11 @@ impl Default for AsnDb {
 fn find_asn_mmdb() -> Option<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
 
-    if let Ok(p) = std::env::var("HOPGLOBE_ASN_MMDB") {
+    if let Ok(p) = std::env::var("NETWORK_CARTOGRAPHER_ASN_MMDB") {
         paths.push(PathBuf::from(p));
     }
     // Sibling ASN next to city DB path
-    if let Ok(p) = std::env::var("HOPGLOBE_MMDB") {
+    if let Ok(p) = std::env::var("NETWORK_CARTOGRAPHER_MMDB") {
         let p = PathBuf::from(p);
         if let Some(parent) = p.parent() {
             paths.push(parent.join("GeoLite2-ASN.mmdb"));
@@ -136,7 +130,7 @@ fn find_asn_mmdb() -> Option<PathBuf> {
             #[cfg(target_os = "macos")]
             {
                 paths.push(home.join("Library/Application Support/GeoIP/GeoLite2-ASN.mmdb"));
-                paths.push(home.join("Library/Application Support/hopglobe/GeoLite2-ASN.mmdb"));
+                paths.push(home.join("Library/Application Support/network-cartographer/GeoLite2-ASN.mmdb"));
             }
         }
         paths.push(PathBuf::from("/usr/share/GeoIP/GeoLite2-ASN.mmdb"));
@@ -148,7 +142,7 @@ fn find_asn_mmdb() -> Option<PathBuf> {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             let local = PathBuf::from(local);
             paths.push(local.join("GeoIP").join("GeoLite2-ASN.mmdb"));
-            paths.push(local.join("hopglobe").join("GeoLite2-ASN.mmdb"));
+            paths.push(local.join("network-cartographer").join("GeoLite2-ASN.mmdb"));
         }
         if let Ok(profile) = std::env::var("USERPROFILE") {
             paths.push(PathBuf::from(profile).join("GeoLite2-ASN.mmdb"));

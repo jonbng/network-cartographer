@@ -1,5 +1,5 @@
-const ONBOARDING_KEY = "hopglobe.onboarding.v1";
-const PRIVACY_KEY = "hopglobe.privacy.accepted";
+const ONBOARDING_KEY = "network-cartographer.onboarding.v1";
+const PRIVACY_KEY = "network-cartographer.privacy.accepted";
 
 const TIPS = [
   "Drag to orbit the globe · scroll to zoom (globe only, not the page)",
@@ -24,8 +24,8 @@ function mountPrivacyModal(onAccept: () => void | Promise<void>): void {
     <div class="modal-card">
       <h2 id="privacy-title">Privacy notice</h2>
       <p>
-        <strong>hopglobe</strong> monitors network connections <em>on this machine</em>.
-        Connection lists and process names stay local — they are not uploaded to a hopglobe server.
+        <strong>Network Cartographer</strong> monitors network connections <em>on this machine</em>.
+        Connection lists and process names stay local — they are not uploaded to a Network Cartographer server.
       </p>
       <ul>
         <li>
@@ -38,7 +38,7 @@ function mountPrivacyModal(onAccept: () => void | Promise<void>): void {
       </ul>
       <p class="modal-note">
         Prefer offline geo by placing <code>GeoLite2-City.mmdb</code> on disk or setting
-        <code>HOPGLOBE_MMDB</code> (see README). Free ip-api.com lookups use HTTP only.
+        <code>NETWORK_CARTOGRAPHER_MMDB</code> (see README). Free ip-api.com lookups use HTTP only.
       </p>
       <div class="modal-actions">
         <button type="button" class="btn" data-accept>I understand — continue</button>
@@ -124,5 +124,12 @@ export function mountOnboarding(
     return;
   }
 
+  // If settings were reset but the local fallback still records consent,
+  // synchronize it back to the backend so its privacy gate can open.
+  if (!options.privacyAccepted) {
+    void Promise.resolve(options.onAcceptPrivacy()).catch(() => {
+      /* preview or temporarily unavailable backend */
+    });
+  }
   mountTips(host);
 }

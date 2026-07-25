@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve hopglobe.
+Thanks for helping improve Network Cartographer.
 
 Please read the [Code of Conduct](./CODE_OF_CONDUCT.md). Security issues: [SECURITY.md](./SECURITY.md).
 
@@ -32,4 +32,4 @@ npm run tauri dev
 
 ## Reporting bugs
 
-Use the bug report template. Include OS, hopglobe version (footer / About), and whether the app was elevated.
+Use the bug report template. Include OS, Network Cartographer version (footer / About), and whether the app was elevated.

@@ -51,28 +51,6 @@ pub enum TraceStatus {
     Failed { message: String, at: Instant },
 }
 
-impl TraceStatus {
-    pub fn short_label(&self) -> String {
-        match self {
-            TraceStatus::Idle => "·".into(),
-            TraceStatus::Queued => "queued".into(),
-            TraceStatus::Running => "tracing…".into(),
-            TraceStatus::Done(r) => {
-                if let Some(err) = &r.error {
-                    if r.hops.is_empty() {
-                        return format!("fail:{}", truncate(err, 12));
-                    }
-                }
-                match r.final_rtt_ms() {
-                    Some(ms) => format!("hops {}  {:.0}ms", r.hop_count(), ms),
-                    None => format!("hops {}", r.hop_count()),
-                }
-            }
-            TraceStatus::Failed { message, .. } => format!("fail:{}", truncate(message, 12)),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TraceStats {
     pub queued: usize,
@@ -95,8 +73,6 @@ pub struct TraceEngine {
     running: HashSet<IpAddr>,
     job_tx: Option<Sender<IpAddr>>,
     result_rx: Receiver<JobResult>,
-    /// Shared running counter for stats (workers don't mutate engine sets directly).
-    active: Arc<Mutex<usize>>,
 }
 
 impl TraceEngine {
@@ -104,8 +80,6 @@ impl TraceEngine {
         let (result_tx, result_rx) = mpsc::channel::<JobResult>();
         let (job_tx, job_rx) = mpsc::channel::<IpAddr>();
         let job_rx = Arc::new(Mutex::new(job_rx));
-        let active = Arc::new(Mutex::new(0usize));
-
         if cfg.enabled {
             let workers = cfg.max_concurrent.max(1);
             let probe = ProbeConfig {
@@ -115,11 +89,10 @@ impl TraceEngine {
             for i in 0..workers {
                 let job_rx = Arc::clone(&job_rx);
                 let result_tx = result_tx.clone();
-                let active = Arc::clone(&active);
                 let probe = probe.clone();
                 thread::Builder::new()
                     .name(format!("trace-worker-{i}"))
-                    .spawn(move || worker_loop(job_rx, result_tx, active, probe))
+                    .spawn(move || worker_loop(job_rx, result_tx, probe))
                     .expect("spawn trace worker");
             }
         }
@@ -132,7 +105,6 @@ impl TraceEngine {
             running: HashSet::new(),
             job_tx: Some(job_tx),
             result_rx,
-            active,
         }
     }
 
@@ -173,12 +145,19 @@ impl TraceEngine {
     }
 
     pub fn force(&mut self, ip: IpAddr) {
-        if !self.cfg.enabled {
+        if !self.cfg.enabled
+            || (self.cfg.skip_private && is_local_or_private(ip))
+            || !is_valid_target(ip)
+        {
+            return;
+        }
+        self.poll();
+        // An in-flight or already queued probe is already the freshest result
+        // available. Repeated UI clicks must not build a duplicate queue.
+        if self.pending.contains(&ip) || self.running.contains(&ip) {
             return;
         }
         self.cache.remove(&ip);
-        self.pending.remove(&ip);
-        // Don't remove from running — let it finish; new request after
         self.pending.insert(ip);
         self.queue.push_back(ip);
         self.cache.insert(ip, TraceStatus::Queued);
@@ -239,23 +218,6 @@ impl TraceEngine {
         // leave in-flight workers; results will repopulate cache
     }
 
-    /// Wait until queue and running are empty, or timeout.
-    pub fn wait_idle(&mut self, timeout: Duration) {
-        let start = Instant::now();
-        while start.elapsed() < timeout {
-            self.poll();
-            if self.queue.is_empty() && self.running.is_empty() && self.pending.is_empty() {
-                // also check active workers
-                let active = self.active.lock().map(|g| *g).unwrap_or(0);
-                if active == 0 {
-                    return;
-                }
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        self.poll();
-    }
-
     fn dispatch(&mut self) {
         let Some(tx) = &self.job_tx else {
             return;
@@ -285,7 +247,6 @@ impl TraceEngine {
 fn worker_loop(
     job_rx: Arc<Mutex<Receiver<IpAddr>>>,
     result_tx: Sender<JobResult>,
-    active: Arc<Mutex<usize>>,
     probe: ProbeConfig,
 ) {
     loop {
@@ -300,15 +261,7 @@ fn worker_loop(
             }
         };
 
-        if let Ok(mut n) = active.lock() {
-            *n += 1;
-        }
-
         let result = execute_trace(ip, &probe);
-
-        if let Ok(mut n) = active.lock() {
-            *n = n.saturating_sub(1);
-        }
 
         if result_tx
             .send(JobResult { ip, result })
@@ -380,6 +333,7 @@ fn path_quality(r: &TraceResult, target: IpAddr) -> i32 {
 /// Linux: TCP → ICMP → UDP → tracepath (GNU traceroute flags).
 /// macOS / other BSD-like Unix: ICMP → UDP (no `-T`/`-N`/`tracepath`).
 /// Windows: `tracert`.
+#[allow(clippy::needless_return)] // cfg branches are clearer as explicit returns.
 fn commands_for(target: IpAddr, probe: &ProbeConfig) -> Vec<(String, Vec<String>)> {
     let ip = target.to_string();
     let max = probe.max_hops.to_string();
@@ -467,8 +421,47 @@ fn commands_for(target: IpAddr, probe: &ProbeConfig) -> Vec<(String, Vec<String>
         ];
     }
 
-    // macOS and other non-Linux Unix: BSD traceroute (no -T, -N, or tracepath).
-    #[cfg(all(unix, not(target_os = "linux")))]
+    // macOS ships separate IPv4/IPv6 binaries. Both use BSD flags.
+    #[cfg(target_os = "macos")]
+    {
+        let program = if target.is_ipv6() {
+            "traceroute6"
+        } else {
+            "traceroute"
+        };
+        return vec![
+            (
+                program.into(),
+                vec![
+                    "-I".into(),
+                    "-n".into(),
+                    "-w".into(),
+                    "1".into(),
+                    "-q".into(),
+                    "1".into(),
+                    "-m".into(),
+                    max.clone(),
+                    ip.clone(),
+                ],
+            ),
+            (
+                program.into(),
+                vec![
+                    "-n".into(),
+                    "-w".into(),
+                    "1".into(),
+                    "-q".into(),
+                    "1".into(),
+                    "-m".into(),
+                    max,
+                    ip,
+                ],
+            ),
+        ];
+    }
+
+    // Other non-Linux Unix targets use BSD traceroute flags.
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     {
         return vec![
             (
@@ -524,15 +517,6 @@ fn is_valid_target(ip: IpAddr) -> bool {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,6 +559,15 @@ mod tests {
         }
         // ICMP then UDP
         assert!(cmds[0].1.iter().any(|a| a == "-I"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_ipv6_uses_traceroute6() {
+        let target: IpAddr = "2606:4700:4700::1111".parse().unwrap();
+        let cmds = commands_for(target, &probe());
+        assert!(!cmds.is_empty());
+        assert!(cmds.iter().all(|(program, _)| program == "traceroute6"));
     }
 
     #[cfg(target_os = "windows")]

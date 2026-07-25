@@ -1,6 +1,6 @@
-//! hopglobe CLI experiment — terminal-native UI (no HTML, no WebView).
+//! Network Cartographer CLI experiment — terminal-native UI (no HTML, no WebView).
 //!
-//! Does not touch hopglobe core source. Mock paths only for now.
+//! Does not touch Network Cartographer core source. Mock paths only for now.
 
 mod gfx;
 mod globe;
@@ -62,7 +62,7 @@ struct App {
 }
 
 fn find_earth_texture() -> PathBuf {
-    if let Ok(p) = env::var("HOPGLOBE_EARTH") {
+    if let Ok(p) = env::var("NETWORK_CARTOGRAPHER_EARTH") {
         return PathBuf::from(p);
     }
     let candidates = [
@@ -77,7 +77,7 @@ fn find_earth_texture() -> PathBuf {
             return p;
         }
     }
-    PathBuf::from("/home/jonathan/code/hopglobe/ui/public/earth-dark.jpg")
+    PathBuf::from("/home/jonathan/code/network-cartographer/ui/public/earth-dark.jpg")
 }
 
 fn main() -> Result<()> {
@@ -463,13 +463,13 @@ fn ui(f: &mut Frame, app: &mut App) {
     let n_hops: usize = app.globe.paths.iter().map(|p| p.hops.len()).sum();
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            " HG ",
+            " NC ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" hopglobe "),
+        Span::raw(" Network Cartographer "),
         Span::styled("cli", Style::default().fg(Color::DarkGray)),
         Span::raw("  ·  "),
         Span::styled(format!("{n_apps} apps"), Style::default().fg(Color::Cyan)),
@@ -498,7 +498,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Style::default().fg(Color::DarkGray),
         ),
     ]))
-    .block(Block::default().borders(Borders::ALL).title("hopglobe"));
+    .block(Block::default().borders(Borders::ALL).title("Network Cartographer"));
     f.render_widget(header, root[0]);
 
     let body = Layout::default()

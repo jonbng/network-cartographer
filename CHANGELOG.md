@@ -23,4 +23,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Free ip-api.com batch lookups are HTTP-only; prefer a local GeoLite2 MMDB
 - Unsigned builds may trigger OS trust warnings until code signing is configured
 
-[0.1.0]: https://github.com/jonbng/hopglobe/releases/tag/v0.1.0
+[0.1.0]: https://github.com/jonbng/network-cartographer/releases/tag/v0.1.0

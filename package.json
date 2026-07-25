@@ -1,5 +1,5 @@
 {
-  "name": "hopglobe",
+  "name": "network-cartographer",
   "private": true,
   "version": "0.1.0",
   "description": "Desktop app that shows which applications talk to the internet, where they connect, and traceroute paths on a 3D globe",
@@ -7,12 +7,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jonbng/hopglobe.git"
+    "url": "https://github.com/jonbng/network-cartographer.git"
   },
   "bugs": {
-    "url": "https://github.com/jonbng/hopglobe/issues"
+    "url": "https://github.com/jonbng/network-cartographer/issues"
   },
-  "homepage": "https://github.com/jonbng/hopglobe#readme",
+  "homepage": "https://github.com/jonbng/network-cartographer#readme",
   "keywords": [
     "tauri",
     "network",
@@ -21,7 +21,7 @@
     "desktop",
     "globe",
     "monitoring",
-    "hopglobe"
+    "network-cartographer"
   ],
   "type": "module",
   "scripts": {

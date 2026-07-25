@@ -73,9 +73,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: v__VERSION__
-          releaseName: "hopglobe v__VERSION__"
+          releaseName: "Network Cartographer v__VERSION__"
           releaseBody: |
-            ## hopglobe v__VERSION__
+            ## Network Cartographer v__VERSION__
 
             Desktop network monitor with traceroute paths on a 3D globe.
 
@@ -89,7 +89,7 @@ jobs:
             | macOS | `.dmg` / `.app` (may be unsigned — right-click → Open on first launch) |
             | Windows | `.msi` / NSIS `.exe` (SmartScreen may warn until signed) |
 
-            See [CHANGELOG.md](https://github.com/jonbng/hopglobe/blob/main/CHANGELOG.md) and the README for privacy notes and GeoLite2 setup.
+            See [CHANGELOG.md](https://github.com/jonbng/network-cartographer/blob/main/CHANGELOG.md) and the README for privacy notes and GeoLite2 setup.
 
             ### Verify
 

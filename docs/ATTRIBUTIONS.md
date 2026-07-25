@@ -9,8 +9,8 @@ If you replace this asset for redistribution, use a basemap with a clear public 
 - [NASA Blue Marble](https://visibleearth.nasa.gov/collection/1484/blue-marble) derivatives (NASA imagery; check current NASA media guidelines)
 - Other public-domain or Creative Commons equirectangular maps
 
-Do not redistribute MaxMind GeoLite2 databases with hopglobe; they have a separate license and must be obtained by each user (see `scripts/update-geolite2.sh`).
+Do not redistribute MaxMind GeoLite2 databases with Network Cartographer; they have a separate license and must be obtained by each user (see `scripts/update-geolite2.sh`).
 
 ## Libraries
 
-hopglobe depends on open-source packages declared in `package.json` and `src-tauri/Cargo.toml`, including Tauri, Three.js / globe.gl, and various Rust crates. Their licenses apply as usual.
+Network Cartographer depends on open-source packages declared in `package.json` and `src-tauri/Cargo.toml`, including Tauri, Three.js / globe.gl, and various Rust crates. Their licenses apply as usual.
