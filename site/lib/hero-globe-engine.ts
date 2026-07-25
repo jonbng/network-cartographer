@@ -60,16 +60,16 @@ export async function mountHeroGlobe(
 
   const controls = globe.controls();
   controls.autoRotate = options.autoRotate;
-  controls.autoRotateSpeed = 0.55;
+  controls.autoRotateSpeed = 0.2;
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.minDistance = 120;
+  controls.minDistance = 140;
   controls.maxDistance = 520;
   controls.enableZoom = true;
   controls.zoomSpeed = 0.7;
 
   // Frame the Atlantic / Americas where the demo routes live.
-  globe.pointOfView({ lat: 32, lng: -55, altitude: 1.55 }, 0);
+  globe.pointOfView({ lat: 30, lng: -60, altitude: 1.7 }, 0);
 
   const { points, arcs, labels } = buildGeometry(paths, options.animateArcs);
   globe.pointsData(points);

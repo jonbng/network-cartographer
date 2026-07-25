@@ -17,9 +17,7 @@ export default function Home() {
           </a>
         </div>
 
-        <h1 className="hero-title">
-          See which apps on your machine talk to the internet — and the path each connection takes.
-        </h1>
+        <h1 className="hero-title">See which apps talk to the internet.</h1>
 
         <p className="hero-lede">
           Local CLI. Per-app TCP map, traceroutes, globe UI on <code>127.0.0.1</code>. No account.

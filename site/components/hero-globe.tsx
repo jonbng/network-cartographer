@@ -20,8 +20,9 @@ export function HeroGlobe() {
       try {
         const { mountHeroGlobe } = await import("@/lib/hero-globe-engine");
         if (cancelled || !stageRef.current) return;
+        // Keep the camera on the demo hemisphere; no auto-spin.
         const handle = await mountHeroGlobe(stageRef.current, DEMO_PATHS, {
-          autoRotate: !reduceMotion,
+          autoRotate: false,
           animateArcs: !reduceMotion,
         });
         if (cancelled) {
@@ -35,15 +36,8 @@ export function HeroGlobe() {
       }
     })();
 
-    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const onMotionChange = () => {
-      handleRef.current?.setAutoRotate(!motionQuery.matches);
-    };
-    motionQuery.addEventListener("change", onMotionChange);
-
     return () => {
       cancelled = true;
-      motionQuery.removeEventListener("change", onMotionChange);
       handleRef.current?.dispose();
       handleRef.current = null;
     };
@@ -78,7 +72,7 @@ export function HeroGlobe() {
                   <span className="legend-app">{path.app}</span>
                   <span className="legend-host">{path.host}</span>
                   <span className="legend-meta">
-                    {last?.city ?? "—"} · {path.rttMs.toFixed(0)}ms
+                    {last?.city ?? "-"} · {path.rttMs.toFixed(0)}ms
                   </span>
                 </li>
               );
@@ -87,7 +81,7 @@ export function HeroGlobe() {
         </aside>
       </div>
       <figcaption className="globe-caption">
-        Sample data — not your machine. Drag to orbit, scroll to zoom.
+        Sample data, not your machine. Drag to orbit, scroll to zoom.
       </figcaption>
     </figure>
   );
