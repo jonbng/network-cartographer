@@ -76,6 +76,8 @@ netcart [--port PORT] [--no-open]
 --no-open    Start the server without opening a browser
 ```
 
+Set `NETCART_DEBUG=1` to include technical geolocation diagnostics in the CLI output.
+
 The server deliberately listens only on loopback. It is not intended to be exposed to a LAN or the public internet.
 
 ## Development

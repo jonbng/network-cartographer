@@ -81,14 +81,22 @@ pub async fn run() -> Result<(), String> {
         .map_err(|error| format!("could not read server address: {error}"))?;
     let url = format!("http://{address}");
 
-    println!("Network Cartographer is running at {url}");
-    println!("Press Ctrl+C to stop.");
+    println!("  Network Cartographer");
+    println!("  Dashboard  {url}");
+    println!("  Access     This machine only");
+    println!();
     if options.open_browser {
         if let Err(error) = webbrowser::open(&url) {
-            eprintln!("Could not open your browser: {error}");
-            eprintln!("Open {url} manually.");
+            eprintln!("  Browser    Could not open automatically");
+            eprintln!("             Open {url} manually ({error})");
+        } else {
+            println!("  Browser    Opened automatically");
         }
+    } else {
+        println!("  Browser    Not opened (--no-open)");
     }
+    println!("  Stop       Press Ctrl+C");
+    println!();
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown))
@@ -98,7 +106,7 @@ pub async fn run() -> Result<(), String> {
 
 async fn shutdown_signal(shutdown: broadcast::Sender<()>) {
     let _ = tokio::signal::ctrl_c().await;
-    println!("\nStopping Network Cartographer…");
+    println!("\n  Stopping Network Cartographer…");
     // Graceful shutdown waits for every response body to finish. Tell the
     // long-lived SSE response to close before asking Axum to drain connections.
     let _ = shutdown.send(());

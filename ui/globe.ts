@@ -120,20 +120,20 @@ let lastFrameBounds: string | null = null;
 let onHopClick: ((selection: HopSelection) => void) | null = null;
 
 const PALETTE = [
-  "#5eead4",
-  "#a78bfa",
-  "#34d399",
-  "#f472b6",
-  "#fbbf24",
-  "#60a5fa",
-  "#fb7185",
-  "#2dd4bf",
-  "#c084fc",
-  "#4ade80",
-  "#38bdf8",
-  "#e879f9",
-  "#f97316",
-  "#14b8a6",
+  "#e0a86a",
+  "#8fb4a2",
+  "#d5c07a",
+  "#c98c76",
+  "#9caaa2",
+  "#b69ac5",
+  "#d88273",
+  "#82aeb1",
+  "#c4a56d",
+  "#8dae7f",
+  "#87a1bf",
+  "#bd8e9e",
+  "#cf9364",
+  "#789e91",
 ];
 
 export function colorForKey(key: string): string {
@@ -197,7 +197,7 @@ export function initGlobe(container: HTMLElement) {
   globe = new Globe(container)
     .backgroundColor("rgba(0,0,0,0)")
     .showAtmosphere(true)
-    .atmosphereColor("#5eead4")
+    .atmosphereColor("#e0a86a")
     .atmosphereAltitude(0.2)
     .globeImageUrl("/earth-dark.jpg")
     .pointAltitude((d: object) => ((d as Point).isDestination ? 0.018 : 0.008))

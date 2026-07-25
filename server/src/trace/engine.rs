@@ -30,8 +30,9 @@ impl Default for TraceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            // More workers = faster queue drain for many destinations
-            max_concurrent: 6,
+            // Traceroutes spend most of their lifetime waiting on network
+            // replies, so a moderately larger pool drains bursts much faster.
+            max_concurrent: 20,
             cache_ttl: Duration::from_secs(900),
             // Most paths settle well under 20 hops; saves probe time
             max_hops: 20,

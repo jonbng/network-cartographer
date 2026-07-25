@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -66,18 +69,20 @@ impl GeoCache {
             .as_ref()
             .and_then(|p| match maxminddb::Reader::open_readfile(p) {
                 Ok(r) => {
-                    eprintln!("[geo] loaded MaxMind DB: {}", p.display());
+                    super::debug(format_args!("Loaded city database: {}", p.display()));
                     Some(r)
                 }
                 Err(e) => {
-                    eprintln!("[geo] failed to open {}: {e}", p.display());
+                    eprintln!(
+                        "  Warning    Could not read the local city database at {} ({e})",
+                        p.display()
+                    );
                     None
                 }
             });
         if mmdb.is_none() {
-            eprintln!(
-                "[geo] no local GeoLite2-City.mmdb — hosted geo via mapmy.network \
-                 (optional offline DB: project root or data/GeoLite2-City.mmdb)"
+            super::debug(
+                "No local city database found; hosted geolocation is available after consent",
             );
         }
         Self {
@@ -470,20 +475,20 @@ fn fetch_hosted_geo(ips: &[IpAddr]) -> Option<Vec<(IpAddr, GeoHint)>> {
     {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[geo] hosted lookup failed: {e}");
+            hosted_geo_failure(format_args!("request failed: {e}"));
             return None;
         }
     };
 
     if resp.status() >= 400 {
-        eprintln!("[geo] hosted lookup HTTP {}", resp.status());
+        hosted_geo_failure(format_args!("HTTP {}", resp.status()));
         return None;
     }
 
     let parsed: HostedGeoResponse = match resp.into_json() {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[geo] hosted lookup decode failed: {e}");
+            hosted_geo_failure(format_args!("invalid response: {e}"));
             return None;
         }
     };
@@ -531,6 +536,17 @@ fn fetch_hosted_geo(ips: &[IpAddr]) -> Option<Vec<(IpAddr, GeoHint)>> {
     } else {
         Some(out)
     }
+}
+
+static HOSTED_GEO_WARNING_SHOWN: AtomicBool = AtomicBool::new(false);
+
+fn hosted_geo_failure(details: impl std::fmt::Display) {
+    if !HOSTED_GEO_WARNING_SHOWN.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "  Warning    Map locations may be incomplete; hosted geolocation is unavailable"
+        );
+    }
+    super::debug(format_args!("Hosted geolocation {details}"));
 }
 
 impl Default for GeoCache {

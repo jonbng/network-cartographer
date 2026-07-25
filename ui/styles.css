@@ -1,24 +1,24 @@
 :root {
   color-scheme: dark;
-  --bg: #06090d;
-  --panel: #0a0e13;
-  --panel-floating: rgba(15, 20, 27, 0.94);
-  --panel-soft: rgba(13, 18, 24, 0.78);
-  --line: rgba(148, 163, 184, 0.13);
-  --line-strong: rgba(148, 163, 184, 0.22);
-  --text: #edf2f5;
-  --text-soft: #bbc5cc;
-  --muted: #707d87;
-  --accent: #5eead4;
-  --accent-bright: #99f6e4;
-  --accent-dim: rgba(94, 234, 212, 0.1);
-  --ok: #6ee7a8;
-  --warn: #f2c66d;
-  --bad: #fb7185;
-  --dest: #f0a6ca;
-  --font: "Aptos", "Helvetica Neue", sans-serif;
-  --mono: "Berkeley Mono", "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
-  --sidebar-w: 318px;
+  --bg: #0b0c0c;
+  --panel: #0e0f0f;
+  --panel-floating: rgba(16, 17, 17, 0.96);
+  --panel-soft: rgba(16, 17, 17, 0.82);
+  --line: rgba(235, 232, 224, 0.14);
+  --line-strong: rgba(235, 232, 224, 0.24);
+  --text: #ebe8e0;
+  --text-soft: #cbc7bd;
+  --muted: #8a8680;
+  --accent: #e0a86a;
+  --accent-bright: #efc28f;
+  --accent-dim: rgba(224, 168, 106, 0.14);
+  --ok: #8fbd91;
+  --warn: #d9b96e;
+  --bad: #d8796f;
+  --dest: #e4c28e;
+  --font: "IBM Plex Mono", "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
+  --mono: "IBM Plex Mono", "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
+  --sidebar-w: 332px;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
 }
@@ -1493,4 +1493,491 @@ kbd {
   .about-button {
     transition-property: color, background-color, border-color;
   }
+}
+
+/* --------------------------------------------------------------------------
+   Mapmy.network visual system
+   The app intentionally shares the marketing site's terminal-like restraint:
+   warm signal color, square rules, mono type, and dense local-first telemetry.
+   -------------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+}
+
+body {
+  font-size: 14px;
+  letter-spacing: -0.005em;
+}
+
+::selection {
+  background: var(--accent-dim);
+  color: var(--text);
+}
+
+.app::after {
+  content: "LOCALHOST / NETWORK CARTOGRAPHER";
+  position: absolute;
+  right: 26px;
+  bottom: 43px;
+  z-index: 2;
+  color: rgba(235, 232, 224, 0.22);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  pointer-events: none;
+  writing-mode: vertical-rl;
+}
+
+.globe-stage {
+  background:
+    radial-gradient(circle at 52% 48%, rgba(224, 168, 106, 0.09), transparent 24%),
+    radial-gradient(ellipse at 52% 48%, #141414 0%, #0d0e0e 52%, var(--bg) 100%);
+}
+
+.map-grid {
+  opacity: 0.36;
+  background-image:
+    linear-gradient(rgba(235, 232, 224, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(235, 232, 224, 0.035) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: linear-gradient(to bottom, black, transparent 30%, transparent 72%, black);
+}
+
+.map-grid::before,
+.map-grid::after {
+  width: 34px;
+  height: 34px;
+  border-color: rgba(224, 168, 106, 0.48);
+}
+
+.sidebar {
+  background: var(--panel);
+  border-color: var(--line);
+  box-shadow: 14px 0 50px rgba(0, 0, 0, 0.28);
+}
+
+.brand {
+  height: 86px;
+  flex-basis: 86px;
+  gap: 13px;
+  padding: 0 20px;
+}
+
+.logo {
+  width: 35px;
+  height: 35px;
+  flex-basis: 35px;
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: -0.06em;
+}
+
+.brand .eyebrow {
+  margin-bottom: 5px;
+  color: var(--accent);
+  font-size: 8px;
+  letter-spacing: 0.09em;
+}
+
+.brand h1 {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.live-mark {
+  align-self: flex-start;
+  margin-top: 28px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.dot,
+.swatch,
+.lg-dot,
+.route-app i,
+.hint i {
+  border-radius: 50% !important;
+}
+
+.dot {
+  width: 5px;
+  height: 5px;
+  background: var(--accent);
+  box-shadow: 0 0 9px rgba(224, 168, 106, 0.78);
+}
+
+.sidebar-tools {
+  padding: 17px 17px 13px;
+}
+
+.search-wrap {
+  height: 40px;
+  padding-inline: 12px;
+  background: #101111;
+  border-color: var(--line);
+}
+
+.search-wrap:focus-within {
+  color: var(--accent);
+  background: #121313;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-dim);
+}
+
+.filter {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.search-key,
+.badge,
+.confidence,
+.hop-place em {
+  border-radius: 0 !important;
+}
+
+.sidebar-head {
+  align-items: center;
+  padding: 13px 18px 10px;
+  border-top: 1px solid var(--line);
+}
+
+.sidebar-title {
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sidebar-title span {
+  margin-right: 7px;
+  color: var(--accent);
+}
+
+.sidebar-sub {
+  margin-top: 5px;
+  font-size: 9px;
+}
+
+.sidebar-list {
+  padding: 0 10px 12px;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.app-card {
+  margin: 0;
+  border-top: 1px solid var(--line);
+}
+
+.app-card:last-child {
+  border-bottom: 1px solid var(--line);
+}
+
+.app-card.focused {
+  background: var(--accent-dim);
+  border-color: rgba(224, 168, 106, 0.36);
+}
+
+.app-card.focused::before {
+  inset: 0 auto 0 -1px;
+  width: 2px;
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.app-row {
+  min-height: 58px;
+  padding: 10px 9px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .app-row:hover,
+  .dest-row:hover {
+    background: rgba(235, 232, 224, 0.035);
+  }
+}
+
+.app-name,
+.dest-host {
+  font-family: var(--mono);
+  font-weight: 400;
+}
+
+.app-name {
+  font-size: 11px;
+}
+
+.app-meta,
+.dest-meta {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.app-meta .act,
+.heading-kicker span,
+.status-message::before,
+.route-choice-arrow {
+  color: var(--accent);
+}
+
+.dest-list {
+  gap: 0;
+  padding: 0 6px 10px 25px;
+}
+
+.dest-row {
+  padding: 9px 8px;
+  border-top-color: rgba(235, 232, 224, 0.08);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.dest-row.selected {
+  border-color: rgba(224, 168, 106, 0.42);
+  background: var(--accent-dim);
+}
+
+.dest-star {
+  color: var(--dest);
+  text-shadow: 0 0 7px rgba(224, 168, 106, 0.45);
+}
+
+.badge.ok { color: var(--ok); border-color: rgba(143, 189, 145, 0.4); }
+.badge.run,
+.badge.queue { color: var(--accent); border-color: rgba(224, 168, 106, 0.4); }
+.badge.fail { color: var(--bad); border-color: rgba(216, 121, 111, 0.4); }
+
+.sidebar-foot {
+  padding: 13px 16px 15px;
+  background: #0c0d0d;
+}
+
+.legend-row {
+  gap: 9px 14px;
+  padding-bottom: 12px;
+  font-size: 8px;
+}
+
+.about-button {
+  border-top: 1px solid var(--line);
+  font-size: 9px;
+}
+
+.header {
+  height: 126px;
+  padding: 25px 30px;
+  background: linear-gradient(180deg, rgba(11, 12, 12, 0.96), rgba(11, 12, 12, 0.5) 68%, transparent);
+}
+
+.heading-kicker {
+  margin-bottom: 8px;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+}
+
+.map-heading h2 {
+  max-width: 16ch;
+  font-size: 21px;
+  font-weight: 400;
+  letter-spacing: -0.03em;
+}
+
+.subtitle {
+  margin-top: 7px;
+  font-size: 9px;
+}
+
+.stats {
+  border-color: var(--line);
+}
+
+.stat {
+  min-width: 86px;
+  padding: 10px 15px 9px;
+}
+
+.stat-label {
+  font-size: 8px;
+  font-weight: 400;
+}
+
+.stat strong {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.stat.technical strong {
+  color: var(--accent);
+}
+
+.map-controls {
+  right: 25px;
+  bottom: 51px;
+  gap: 0;
+  padding: 0;
+  border-color: var(--line-strong);
+  background: rgba(16, 17, 17, 0.93);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.36);
+}
+
+.btn,
+.icon-btn {
+  min-height: 39px;
+  padding: 0 13px;
+  border-right-color: var(--line);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.btn.primary {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: none;
+}
+
+.control-divider {
+  display: none;
+}
+
+.settings-popover {
+  width: 324px;
+  padding: 0;
+  border-color: var(--line-strong);
+  background: rgba(16, 17, 17, 0.98);
+}
+
+.popover-head {
+  padding: 13px 14px;
+}
+
+.popover-head strong,
+.setting-row strong,
+.density-row strong {
+  font-family: var(--mono);
+  font-weight: 400;
+}
+
+.setting-row,
+.density-row {
+  min-height: 54px;
+  padding: 8px 14px;
+}
+
+.setting-row input[type="checkbox"] {
+  border-radius: 999px !important;
+  background: #181919;
+}
+
+.setting-row input[type="checkbox"]::after {
+  border-radius: 50% !important;
+}
+
+.setting-row input[type="checkbox"]:checked {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.setting-row input[type="checkbox"]:checked::after {
+  background: var(--accent);
+}
+
+.select {
+  background: #101111;
+}
+
+.footer {
+  height: 36px;
+  padding: 0 26px;
+  background: rgba(11, 12, 12, 0.9);
+  font-size: 9px;
+}
+
+.route-inspector {
+  top: 126px;
+  bottom: 36px;
+  width: 396px;
+  background: rgba(14, 15, 15, 0.98);
+  border-color: var(--line-strong);
+  box-shadow: -22px 0 60px rgba(0, 0, 0, 0.42);
+}
+
+.inspector-head {
+  min-height: 76px;
+  padding-inline: 20px;
+}
+
+.inspector-head h2,
+.route-identity h3 {
+  font-family: var(--mono);
+  font-weight: 400;
+}
+
+.route-metrics,
+.route-choice,
+.accuracy-note,
+.inactive-notice,
+.trace-error {
+  background: #101111;
+}
+
+.hop-marker {
+  border-radius: 50% !important;
+  background: var(--panel);
+}
+
+.network-boundary,
+.inspector-label {
+  color: var(--accent);
+}
+
+.modal {
+  background: rgba(5, 6, 6, 0.82);
+}
+
+.modal-card {
+  padding: 28px;
+  background: var(--panel);
+  border-color: var(--line-strong);
+}
+
+.modal-icon {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.modal-card h2,
+.modal-card h3 {
+  font-family: var(--mono);
+  font-weight: 400;
+}
+
+.onboarding,
+.toast,
+.banner {
+  background: var(--panel-floating);
+}
+
+@media (max-width: 1080px) {
+  :root { --sidebar-w: 298px; }
+}
+
+@media (max-width: 760px) {
+  :root { --sidebar-w: 258px; }
+  .app::after { display: none; }
+  .header { padding-inline: 18px; }
+  .brand { padding-inline: 15px; }
+  .logo { display: none; }
 }

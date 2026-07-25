@@ -24,16 +24,19 @@ impl AsnDb {
             .as_ref()
             .and_then(|p| match maxminddb::Reader::open_readfile(p) {
                 Ok(r) => {
-                    eprintln!("[geo] loaded MaxMind ASN DB: {}", p.display());
+                    super::debug(format_args!("Loaded ASN database: {}", p.display()));
                     Some(r)
                 }
                 Err(e) => {
-                    eprintln!("[geo] failed to open ASN {}: {e}", p.display());
+                    eprintln!(
+                        "  Warning    Could not read the local ASN database at {} ({e})",
+                        p.display()
+                    );
                     None
                 }
             });
         if reader.is_none() {
-            eprintln!("[geo] no GeoLite2-ASN.mmdb found (optional)");
+            super::debug("No local ASN database found; organization names may be limited");
         }
         Self {
             reader,

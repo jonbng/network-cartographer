@@ -41,11 +41,7 @@ impl Monitor {
         let retain = Duration::from_secs(45);
         let trace_cfg = TraceConfig {
             enabled: settings.traces_enabled,
-            max_concurrent: 6,
-            cache_ttl: Duration::from_secs(900),
-            max_hops: 20,
-            process_timeout: Duration::from_secs(28),
-            skip_private: true,
+            ..TraceConfig::default()
         };
 
         Self {
@@ -148,11 +144,7 @@ impl Monitor {
         if traces_changed {
             let cfg = TraceConfig {
                 enabled: settings.traces_enabled,
-                max_concurrent: 6,
-                cache_ttl: Duration::from_secs(900),
-                max_hops: 20,
-                process_timeout: Duration::from_secs(28),
-                skip_private: true,
+                ..TraceConfig::default()
             };
             *self.traces.lock() = TraceEngine::new(cfg);
             self.path_geo.clear();
