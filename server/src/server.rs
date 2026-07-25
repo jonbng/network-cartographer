@@ -33,6 +33,7 @@ struct WebAssets;
 struct AppState {
     monitor: Arc<Monitor>,
     events: broadcast::Sender<ServerEvent>,
+    shutdown: broadcast::Sender<()>,
 }
 
 #[derive(Clone)]
@@ -51,9 +52,14 @@ pub async fn run() -> Result<(), String> {
     let options = Options::from_env()?;
     let monitor = Arc::new(Monitor::new());
     let (events, _) = broadcast::channel(32);
+    let (shutdown, _) = broadcast::channel(1);
     spawn_background_tasks(Arc::clone(&monitor), events.clone());
 
-    let state = AppState { monitor, events };
+    let state = AppState {
+        monitor,
+        events,
+        shutdown: shutdown.clone(),
+    };
     let app = Router::new()
         .route("/api/version", get(version))
         .route("/api/snapshot", get(snapshot))
@@ -85,14 +91,17 @@ pub async fn run() -> Result<(), String> {
     }
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .map_err(|error| format!("web server stopped unexpectedly: {error}"))
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown: broadcast::Sender<()>) {
     let _ = tokio::signal::ctrl_c().await;
     println!("\nStopping Map My Network…");
+    // Graceful shutdown waits for every response body to finish. Tell the
+    // long-lived SSE response to close before asking Axum to drain connections.
+    let _ = shutdown.send(());
 }
 
 async fn version() -> Json<VersionResponse> {
@@ -149,6 +158,7 @@ async fn trace_all(
 async fn event_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let mut shutdown = state.shutdown.subscribe();
     let stream = BroadcastStream::new(state.events.subscribe()).filter_map(|message| {
         let event = match message.ok()? {
             ServerEvent::Snapshot(snapshot) => event("monitor-update", &snapshot),
@@ -156,6 +166,9 @@ async fn event_stream(
             ServerEvent::PathChanged(change) => event("path-changed", &change),
         };
         Some(Ok(event))
+    });
+    let stream = futures_util::StreamExt::take_until(stream, async move {
+        let _ = shutdown.recv().await;
     });
 
     Sse::new(stream).keep_alive(

@@ -1,7 +1,7 @@
 {
   "name": "network-cartographer",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Map My Network — a local CLI network monitor with a browser-based 3D globe UI",
   "author": "Jonathan Bangert",
   "license": "MIT",
