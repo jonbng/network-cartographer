@@ -29,7 +29,7 @@ sysinfo = "0.33"
 thiserror = "2"
 parking_lot = "0.12"
 ureq = { version = "2", default-features = true, features = ["json"] }
-maxminddb = "0.24"
+maxminddb = "0.27"
 libc = "0.2"
 dirs = "6"
 
