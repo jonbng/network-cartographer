@@ -35,7 +35,10 @@ pub struct Monitor {
 
 impl Monitor {
     pub fn new() -> Self {
-        let settings = settings_store::load().unwrap_or_default();
+        let mut settings = settings_store::load().unwrap_or_default();
+        // Keep accepting the old setting on disk, but do not claim UDP support
+        // until the collector can obtain remote UDP peers cross-platform.
+        settings.include_udp = false;
         let retain = Duration::from_secs(45);
         let trace_cfg = TraceConfig {
             enabled: settings.traces_enabled,
@@ -122,7 +125,8 @@ impl Monitor {
         )
     }
 
-    pub fn apply_settings(&self, settings: SettingsDto) {
+    pub fn apply_settings(&self, mut settings: SettingsDto) {
+        settings.include_udp = false;
         let traces_changed = {
             let mut current = self.settings.lock();
             let changed = current.traces_enabled != settings.traces_enabled;

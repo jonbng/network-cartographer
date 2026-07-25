@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Desktop app (Tauri 2) with live per-app TCP/UDP connection monitoring
+- Desktop app (Tauri 2) with live per-app TCP connection monitoring
 - Automatic traceroute queue with per-OS probe methods (Linux / macOS / Windows)
 - Hop geolocation via rDNS / IATA, optional MaxMind GeoLite2, and online fallbacks
 - 3D globe path visualization (globe.gl / Three.js)
 - First-run privacy notice and in-app About / privacy summary
 - System tray with live tooltip
-- Settings persistence (external-only, UDP, traces, local geo, history, density)
+- Settings persistence (external-only, traces, local geo, history, density)
 - GitHub Actions CI (frontend + multi-OS Rust) and release workflow for installers
 
 ### Notes

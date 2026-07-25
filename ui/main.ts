@@ -136,7 +136,6 @@ const el = {
   status: document.getElementById("status-msg")!,
   filter: document.getElementById("filter") as HTMLInputElement,
   togExternal: document.getElementById("tog-external") as HTMLInputElement,
-  togUdp: document.getElementById("tog-udp") as HTMLInputElement,
   togTraces: document.getElementById("tog-traces") as HTMLInputElement,
   togLabels: document.getElementById("tog-labels") as HTMLInputElement,
   togLocalGeo: document.getElementById("tog-local-geo") as HTMLInputElement,
@@ -310,7 +309,9 @@ function sidebarSignature(groups: AppGroup[]): string {
 function currentSettings(): SettingsDto {
   return {
     externalOnly: el.togExternal.checked,
-    includeUdp: el.togUdp.checked,
+    // Retained in the settings schema for compatibility; remote UDP peers are
+    // not exposed by the current cross-platform socket collector.
+    includeUdp: false,
     tracesEnabled: el.togTraces.checked,
     pollIntervalMs: 1000,
     geoLocalOnly: el.togLocalGeo.checked,
@@ -551,7 +552,6 @@ function wireUi() {
 
   for (const t of [
     el.togExternal,
-    el.togUdp,
     el.togTraces,
     el.togLocalGeo,
     el.togHistory,
@@ -657,7 +657,6 @@ async function boot() {
     const settings = await invoke<SettingsDto>("get_settings");
     privacyAccepted = !!settings.privacyAccepted;
     el.togExternal.checked = settings.externalOnly;
-    el.togUdp.checked = settings.includeUdp;
     el.togTraces.checked = settings.tracesEnabled;
     el.togLocalGeo.checked = !!settings.geoLocalOnly;
     el.togHistory.checked = !!settings.historyEnabled;

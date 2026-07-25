@@ -424,40 +424,7 @@ fn commands_for(target: IpAddr, probe: &ProbeConfig) -> Vec<(String, Vec<String>
     // macOS ships separate IPv4/IPv6 binaries. Both use BSD flags.
     #[cfg(target_os = "macos")]
     {
-        let program = if target.is_ipv6() {
-            "traceroute6"
-        } else {
-            "traceroute"
-        };
-        return vec![
-            (
-                program.into(),
-                vec![
-                    "-I".into(),
-                    "-n".into(),
-                    "-w".into(),
-                    "1".into(),
-                    "-q".into(),
-                    "1".into(),
-                    "-m".into(),
-                    max.clone(),
-                    ip.clone(),
-                ],
-            ),
-            (
-                program.into(),
-                vec![
-                    "-n".into(),
-                    "-w".into(),
-                    "1".into(),
-                    "-q".into(),
-                    "1".into(),
-                    "-m".into(),
-                    max,
-                    ip,
-                ],
-            ),
-        ];
+        return macos_commands(target, max, ip);
     }
 
     // Other non-Linux Unix targets use BSD traceroute flags.
@@ -502,6 +469,44 @@ fn commands_for(target: IpAddr, probe: &ProbeConfig) -> Vec<(String, Vec<String>
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_commands(target: IpAddr, max: String, ip: String) -> Vec<(String, Vec<String>)> {
+    let program = if target.is_ipv6() {
+        "traceroute6"
+    } else {
+        "traceroute"
+    };
+    vec![
+        (
+            program.into(),
+            vec![
+                "-I".into(),
+                "-n".into(),
+                "-w".into(),
+                "1".into(),
+                "-q".into(),
+                "1".into(),
+                "-m".into(),
+                max.clone(),
+                ip.clone(),
+            ],
+        ),
+        (
+            program.into(),
+            vec![
+                "-n".into(),
+                "-w".into(),
+                "1".into(),
+                "-q".into(),
+                "1".into(),
+                "-m".into(),
+                max,
+                ip,
+            ],
+        ),
+    ]
+}
+
 fn is_valid_target(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -544,10 +549,10 @@ mod tests {
         assert!(cmds.iter().any(|(p, _)| p == "tracepath"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_commands_have_no_linux_only_flags() {
-        let cmds = commands_for(target_v4(), &probe());
+        let target = target_v4();
+        let cmds = macos_commands(target, "20".into(), target.to_string());
         assert!(!cmds.is_empty());
         for (program, args) in &cmds {
             assert_eq!(program, "traceroute");
@@ -561,11 +566,10 @@ mod tests {
         assert!(cmds[0].1.iter().any(|a| a == "-I"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_ipv6_uses_traceroute6() {
         let target: IpAddr = "2606:4700:4700::1111".parse().unwrap();
-        let cmds = commands_for(target, &probe());
+        let cmds = macos_commands(target, "20".into(), target.to_string());
         assert!(!cmds.is_empty());
         assert!(cmds.iter().all(|(program, _)| program == "traceroute6"));
     }

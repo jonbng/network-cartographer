@@ -9,7 +9,7 @@ Works on **Linux, macOS, and Windows**.
 
 ## Features
 
-- Live list of apps with active TCP (and optional UDP) connections
+- Live list of apps with active TCP connections
 - Destinations (IP / reverse-DNS hostname + port)
 - Automatic background traceroutes (cached per IP, limited concurrency)
 - **Hop geolocation** (rDNS / IATA codes + free GeoIP + latency consistency checks)
@@ -177,7 +177,7 @@ See also [SECURITY.md](./SECURITY.md).
 ## Limitations
 
 - HTTPS URLs/paths are not visible (encrypted)
-- UDP remote peers are not fully listed on all platforms
+- UDP connection peers are not currently listed; the cross-platform collector only exposes local UDP binds
 - Traceroute needs the OS tool installed
 - Short-lived connections may be missed between polls
 - Free GeoIP is rate-limited; offline MMDB avoids that
