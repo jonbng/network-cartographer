@@ -96,16 +96,16 @@ jobs:
             macOS or Linux:
 
             ```bash
-            curl -fsSL https://github.com/jonbng/network-cartographer/releases/latest/download/run.sh | sh
+            curl -fsSL https://mapmy.network/run | sh
             ```
 
             Windows PowerShell:
 
             ```powershell
-            irm https://github.com/jonbng/network-cartographer/releases/latest/download/run.ps1 | iex
+            irm https://mapmy.network/run.ps1 | iex
             ```
 
-            The launcher selects the correct binary, verifies its SHA-256 checksum, runs it as the current user, and removes the temporary download after exit.
+            This starts Network Cartographer as a local CLI and opens the browser UI. Stop it with Ctrl+C; the process exits and cleans itself up.
           files: |
             release-assets/*
             scripts/run.sh

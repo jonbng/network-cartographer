@@ -1,4 +1,4 @@
-# Download the latest Network Cartographer release for Windows and run it.
+# Start Network Cartographer on Windows and clean up after exit.
 $ErrorActionPreference = "Stop"
 
 $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
@@ -15,7 +15,7 @@ try {
   New-Item -ItemType Directory -Path $workDirectory | Out-Null
   $archivePath = Join-Path $workDirectory $archive
 
-  Write-Host "Downloading Network Cartographer for Windows x64..."
+  Write-Host "Starting Network Cartographer..."
   Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archivePath
   $checksumsPath = Join-Path $workDirectory "SHA256SUMS"
   Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$repository/releases/latest/download/SHA256SUMS" -OutFile $checksumsPath
@@ -26,13 +26,13 @@ try {
   $expectedHash = ($checksumLine -split "\s+")[0].ToUpperInvariant()
   $actualHash = (Get-FileHash -Algorithm SHA256 $archivePath).Hash
   if ($actualHash -ne $expectedHash) {
-    throw "The downloaded release failed checksum verification."
+    throw "Network Cartographer failed checksum verification."
   }
   Expand-Archive -Path $archivePath -DestinationPath $workDirectory
 
   $binary = Join-Path $workDirectory "network-cartographer-windows-x86_64/netcart.exe"
   if (-not (Test-Path $binary)) {
-    throw "The downloaded release did not contain the expected binary."
+    throw "Network Cartographer could not be started."
   }
 
   & $binary

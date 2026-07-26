@@ -23,7 +23,7 @@ What you expected to happen.
 
 - OS and version:
 - Network Cartographer version / commit:
-- How you ran it (`npm start`, installed CLI, or release binary):
+- How you ran it (`npm start` or the command from `mapmy.network`):
 
 **Logs / screenshots**
 If relevant, paste console output or attach a screenshot.

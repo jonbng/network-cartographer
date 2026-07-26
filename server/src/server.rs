@@ -81,10 +81,13 @@ pub async fn run() -> Result<(), String> {
         .map_err(|error| format!("could not read server address: {error}"))?;
     let url = format!("http://{address}");
 
-    println!("  Network Cartographer");
+    if std::env::var_os("NETCART_LAUNCHED").is_none() {
+        println!("Network Cartographer");
+        println!("---------------------");
+    }
+    println!("  Status     Running");
     println!("  Dashboard  {url}");
     println!("  Access     This machine only");
-    println!();
     if options.open_browser {
         if let Err(error) = webbrowser::open(&url) {
             eprintln!("  Browser    Could not open automatically");
@@ -101,12 +104,14 @@ pub async fn run() -> Result<(), String> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
-        .map_err(|error| format!("web server stopped unexpectedly: {error}"))
+        .map_err(|error| format!("web server stopped unexpectedly: {error}"))?;
+    println!("  Status     Stopped");
+    Ok(())
 }
 
 async fn shutdown_signal(shutdown: broadcast::Sender<()>) {
     let _ = tokio::signal::ctrl_c().await;
-    println!("\n  Stopping Network Cartographer…");
+    println!("\n  Status     Stopping…");
     // Graceful shutdown waits for every response body to finish. Tell the
     // long-lived SSE response to close before asking Axum to drain connections.
     let _ = shutdown.send(());

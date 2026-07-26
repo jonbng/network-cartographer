@@ -14,7 +14,7 @@ case "$(uname -s)" in
   Linux) platform="linux" ;;
   Darwin) platform="macos" ;;
   *)
-    fail "This launcher supports Linux and macOS. Windows uses run.ps1."
+    fail "This device is not supported yet."
     ;;
 esac
 
@@ -22,53 +22,64 @@ case "$(uname -m)" in
   x86_64|amd64) architecture="x86_64" ;;
   arm64|aarch64) architecture="arm64" ;;
   *)
-    fail "Unsupported CPU architecture: $(uname -m)"
+    fail "This device is not supported yet."
     ;;
 esac
 
 archive="network-cartographer-${platform}-${architecture}.tar.gz"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/network-cartographer.XXXXXX")"
-trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+cleanup() {
+  if [ -d "$work_dir" ]; then
+    rm -rf "$work_dir"
+  fi
+}
+# The app handles Ctrl+C itself. EXIT cleanup runs after that graceful stop.
+trap cleanup 0
 
 printf '\n%s\n' "Network Cartographer"
-printf '  Preparing the latest release for %s/%s\n\n' "$platform" "$architecture"
+printf '%s\n' "---------------------"
 if command -v curl >/dev/null 2>&1; then
-  download() { curl -fL --progress-bar "$1" -o "$2"; }
+  download_progress() { curl -fL --progress-bar "$1" -o "$2"; }
+  download_quiet() { curl -fsSL "$1" -o "$2"; }
 elif command -v wget >/dev/null 2>&1; then
-  download() { wget -q --show-progress "$1" -O "$2"; }
+  download_progress() { wget -q --show-progress "$1" -O "$2"; }
+  download_quiet() { wget -q "$1" -O "$2"; }
 else
-  fail "curl or wget is required to download the release."
+  fail "Network Cartographer needs curl or wget to start."
 fi
-printf '%s\n' "[1/3] Downloading…"
-download "${release_base}/${archive}" "${work_dir}/${archive}" || fail "Could not download ${archive}."
-download "${release_base}/SHA256SUMS" "${work_dir}/SHA256SUMS" || fail "Could not download the release checksum."
+printf '  %-12s %s\n' "Status" "Starting"
+download_progress "${release_base}/${archive}" "${work_dir}/${archive}" || fail "Could not start Network Cartographer. Check your connection and try again."
+download_quiet "${release_base}/SHA256SUMS" "${work_dir}/SHA256SUMS" || fail "Could not start Network Cartographer. Check your connection and try again."
 
-printf '%s\n' "[2/3] Verifying…"
 expected_hash="$(awk -v file="$archive" '$2 == file { print $1 }' "${work_dir}/SHA256SUMS")"
 if [ -z "$expected_hash" ]; then
-  fail "No checksum was published for ${archive}."
+  fail "Network Cartographer could not be verified. Please try again."
 fi
 if command -v sha256sum >/dev/null 2>&1; then
   actual_hash="$(sha256sum "${work_dir}/${archive}" | awk '{ print $1 }')"
 elif command -v shasum >/dev/null 2>&1; then
   actual_hash="$(shasum -a 256 "${work_dir}/${archive}" | awk '{ print $1 }')"
 else
-  fail "sha256sum or shasum is required to verify the download."
+  fail "Network Cartographer could not be verified on this device."
 fi
 if [ "$actual_hash" != "$expected_hash" ]; then
-  fail "The downloaded release failed checksum verification."
+  fail "Network Cartographer could not be verified. Please try again."
 fi
 
-tar -xzf "${work_dir}/${archive}" -C "$work_dir" || fail "Could not unpack the downloaded release."
+tar -xzf "${work_dir}/${archive}" -C "$work_dir" || fail "Network Cartographer could not be prepared. Please try again."
 binary="${work_dir}/network-cartographer-${platform}-${architecture}/netcart"
 if [ ! -f "$binary" ]; then
-  fail "The downloaded release did not contain the expected binary."
+  fail "Network Cartographer could not be prepared. Please try again."
 fi
 chmod +x "$binary"
 
-printf '%s\n\n' "[3/3] Starting…"
 set +e
-"$binary" "$@"
+NETCART_LAUNCHED=1 "$binary" "$@"
 status=$?
 set -e
+
+cleanup
+trap - 0
+printf '  %-12s %s\n' "Cleanup" "temporary files removed"
+printf '  %-12s %s\n\n' "Done" "Network Cartographer stopped"
 exit "$status"

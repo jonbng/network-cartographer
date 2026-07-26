@@ -9,7 +9,7 @@ export default function Home() {
           <p className="brand">Network Cartographer</p>
           <a
             className="star-button star-button-inline"
-            href="https://github.com/jonbng/network-cartographer"
+            href="/source"
             target="_blank"
             rel="noopener noreferrer"
           >

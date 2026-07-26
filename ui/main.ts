@@ -155,6 +155,10 @@ const MIN_PAINT_MS = 1200;
 let lastSidebarSig = "";
 let lastHeaderSig = "";
 
+const UNATTRIBUTED_NAME = "Unattributed traffic";
+const UNATTRIBUTED_ID = "__unattributed__";
+const UNATTRIBUTED_COLOR = "#8a8680";
+
 const el = {
   globe: document.getElementById("globe")!,
   globeStatus: document.getElementById("globe-status")!,
@@ -205,10 +209,10 @@ function destName(d: DestDto): string {
   return d.displayHost || d.sni || d.host || d.ip;
 }
 
-function matchesFilter(app: AppDto, dest: DestDto): boolean {
+function matchesFilter(appName: string, dest: DestDto): boolean {
   const q = filter.trim().toLowerCase();
   if (!q) return true;
-  if (app.name.toLowerCase().includes(q)) return true;
+  if (appName.toLowerCase().includes(q)) return true;
   if (destName(dest).toLowerCase().includes(q)) return true;
   if (dest.ip.includes(q)) return true;
   if (dest.org?.toLowerCase().includes(q)) return true;
@@ -227,8 +231,46 @@ function finalRtt(hops: HopDto[]): number | null {
   return null;
 }
 
-function routeId(app: AppDto, dest: DestDto): string {
-  return `${app.id || app.name}|${dest.protocol}|${dest.ip}|${dest.port}`;
+function routeId(ownerId: string, dest: DestDto): string {
+  return `${ownerId}|${dest.protocol}|${dest.ip}|${dest.port}`;
+}
+
+function pathForDestination(
+  ownerId: string,
+  ownerName: string,
+  color: string,
+  dest: DestDto,
+): GlobePath {
+  return {
+    id: routeId(ownerId, dest),
+    app: ownerName,
+    host: destName(dest),
+    ip: dest.ip,
+    port: dest.port,
+    protocol: dest.protocol,
+    hits: dest.hits,
+    color,
+    hops: dest.trace.hops.map((h) => ({
+      ttl: h.ttl,
+      addr: h.addr,
+      rttMs: h.rttMs,
+      hostname: h.hostname,
+      lat: h.lat,
+      lon: h.lon,
+      city: h.city,
+      country: h.country,
+      geoSource: h.geoSource,
+      geoConfidence: h.geoConfidence,
+      geoNote: h.geoNote,
+      asn: h.asn,
+      org: h.org,
+    })),
+    status: dest.trace.status,
+    rttMs: finalRtt(dest.trace.hops),
+    reachedTarget: !!dest.trace.reachedTarget,
+    targetRttMs: dest.trace.targetRttMs ?? null,
+    error: dest.trace.error,
+  };
 }
 
 function collectPaths(applyFilter = true): GlobePath[] {
@@ -236,38 +278,27 @@ function collectPaths(applyFilter = true): GlobePath[] {
   const paths: GlobePath[] = [];
   for (const app of snapshot.apps) {
     for (const dest of app.destinations) {
-      if (applyFilter && !matchesFilter(app, dest)) continue;
-      paths.push({
-        id: routeId(app, dest),
-        app: app.name,
-        host: destName(dest),
-        ip: dest.ip,
-        port: dest.port,
-        protocol: dest.protocol,
-        hits: dest.hits,
-        color: colorForKey(app.name),
-        hops: dest.trace.hops.map((h) => ({
-          ttl: h.ttl,
-          addr: h.addr,
-          rttMs: h.rttMs,
-          hostname: h.hostname,
-          lat: h.lat,
-          lon: h.lon,
-          city: h.city,
-          country: h.country,
-          geoSource: h.geoSource,
-          geoConfidence: h.geoConfidence,
-          geoNote: h.geoNote,
-          asn: h.asn,
-          org: h.org,
-        })),
-        status: dest.trace.status,
-        rttMs: finalRtt(dest.trace.hops),
-        reachedTarget: !!dest.trace.reachedTarget,
-        targetRttMs: dest.trace.targetRttMs ?? null,
-        error: dest.trace.error,
-      });
+      if (applyFilter && !matchesFilter(app.name, dest)) continue;
+      paths.push(
+        pathForDestination(
+          app.id || app.name,
+          app.name,
+          colorForKey(app.name),
+          dest,
+        ),
+      );
     }
+  }
+  for (const dest of snapshot.unattributed?.destinations ?? []) {
+    if (applyFilter && !matchesFilter(UNATTRIBUTED_NAME, dest)) continue;
+    paths.push(
+      pathForDestination(
+        UNATTRIBUTED_ID,
+        UNATTRIBUTED_NAME,
+        UNATTRIBUTED_COLOR,
+        dest,
+      ),
+    );
   }
   paths.sort(
     (a, b) =>
@@ -295,9 +326,9 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
       traffic: app.traffic ?? null,
     };
     for (const dest of app.destinations) {
-      if (!matchesFilter(app, dest)) continue;
+      if (!matchesFilter(app.name, dest)) continue;
       group.totalDests += 1;
-      const id = routeId(app, dest);
+      const id = routeId(app.id || app.name, dest);
       const path = byId.get(id);
       if (path) {
         group.paths.push(path);
@@ -577,16 +608,17 @@ function renderUnattributed(group: TrafficGroupDto | null): string {
   const rows = group.destinations
     .slice()
     .sort((a, b) => b.hits - a.hits)
-    .map(
-      (dest) => `<div class="dest-row" title="${escapeHtml(dest.ip)}">
+    .map((dest) => {
+      const id = routeId(UNATTRIBUTED_ID, dest);
+      return `<button type="button" class="dest-row${routeInspector.selectedRouteId === id ? " selected" : ""}" data-route-id="${escapeHtml(id)}" title="Inspect unattributed route to ${escapeHtml(dest.ip)}" aria-pressed="${routeInspector.selectedRouteId === id}">
         <span class="dest-star muted-star">?</span>
         <span class="dest-main">
           <span class="dest-host">${escapeHtml(destName(dest))}</span>
           <span class="dest-meta">:${dest.port} · ${escapeHtml(dest.protocol)} · ${dest.hits} connection${dest.hits === 1 ? "" : "s"}</span>
         </span>
         <span class="dest-side">${statusBadge(dest.trace.status)}</span>
-      </div>`,
-    )
+      </button>`;
+    })
     .join("");
   return `<details class="app-card unattributed-card">
     <summary class="app-row">

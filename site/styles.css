@@ -80,12 +80,11 @@ code {
 
 .hero-title {
   margin: 0;
-  max-width: 28rem;
-  font-size: clamp(1.55rem, 3.2vw, 2.15rem);
+  font-size: clamp(1.45rem, 2.8vw, 2.05rem);
   font-weight: 500;
   line-height: 1.2;
   letter-spacing: -0.02em;
-  text-wrap: balance;
+  white-space: nowrap;
 }
 
 .hero-lede {
@@ -281,12 +280,12 @@ code {
 
 .globe-block {
   margin: 0.5rem 0 0;
-  width: min(100%, 38rem);
+  width: 100%;
 }
 
 .globe-shell {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 13.5rem;
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 22rem);
   border: 1px solid var(--line);
   background: #080909;
   min-height: 21rem;
@@ -424,6 +423,12 @@ code {
 
   .globe-legend {
     max-height: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .hero-title {
+    white-space: normal;
   }
 }
 
