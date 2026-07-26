@@ -60,13 +60,16 @@ struct SessionCollectionStats {
 #[derive(Debug)]
 pub struct SocketCollector {
     observed: HashMap<SocketKey, ObservedSocket>,
+    ignored_self: HashMap<SocketKey, Instant>,
     traffic_status: NativeTrafficStatus,
     udp_status: UdpCollectionStatus,
     events: LifecycleEvents,
     native_source: &'static str,
     udp_remote: bool,
     access_limited: usize,
+    truncated_sockets: usize,
     native_warnings: Vec<String>,
+    last_collection_error: Option<String>,
     session: SessionCollectionStats,
     topology_changed: bool,
 }
@@ -75,6 +78,7 @@ impl Default for SocketCollector {
     fn default() -> Self {
         Self {
             observed: HashMap::new(),
+            ignored_self: HashMap::new(),
             traffic_status: NativeTrafficStatus::Disabled,
             udp_status: UdpCollectionStatus::Disabled,
             events: LifecycleEvents::default(),
@@ -87,7 +91,9 @@ impl Default for SocketCollector {
             },
             udp_remote: cfg!(any(target_os = "linux", target_os = "macos")),
             access_limited: 0,
+            truncated_sockets: 0,
             native_warnings: Vec::new(),
+            last_collection_error: None,
             session: SessionCollectionStats::default(),
             topology_changed: false,
         }
@@ -211,8 +217,18 @@ impl SocketCollector {
         // folding it into the old one.
         let mut out = self.drain_close_events();
         process::refresh();
-        let snapshot = native::snapshot(include_udp, enhanced)
-            .context("failed to read native system socket table")?;
+        let snapshot = match native::snapshot(include_udp, enhanced)
+            .context("failed to read native system socket table")
+        {
+            Ok(snapshot) => {
+                self.last_collection_error = None;
+                snapshot
+            }
+            Err(error) => {
+                self.last_collection_error = Some(error.to_string());
+                return Err(error);
+            }
+        };
         self.udp_status = if !include_udp {
             UdpCollectionStatus::Disabled
         } else if snapshot.udp_remote {
@@ -241,6 +257,7 @@ impl SocketCollector {
         self.native_source = snapshot.source;
         self.udp_remote = snapshot.udp_remote;
         self.access_limited = snapshot.access_limited;
+        self.truncated_sockets = snapshot.truncated_sockets;
         self.native_warnings = snapshot.warnings.clone();
         self.traffic_status = if !enhanced {
             NativeTrafficStatus::Disabled
@@ -253,8 +270,16 @@ impl SocketCollector {
         };
 
         out.reserve(snapshot.sockets.len());
-        for socket in snapshot.sockets {
+        for mut socket in snapshot.sockets {
             let key = socket.key();
+            let had_known_owner = !socket.pids.is_empty();
+            process::retain_outside_process_tree(&mut socket.pids, std::process::id());
+            if had_known_owner && socket.pids.is_empty() {
+                // Hide Netcart's own API lookups and its traceroute/tracepath
+                // child processes before they enter retained state.
+                self.ignored_self.insert(key, Instant::now());
+                continue;
+            }
             let owners = socket.pids.into_iter().map(process::resolve_info).collect();
             let (owner, attribution, reason, is_new) =
                 self.attribute(&key, owners, self.access_limited > 0);
@@ -318,6 +343,8 @@ impl SocketCollector {
         self.observed.retain(|_, observed| {
             observed.active || now.duration_since(observed.last_seen) <= OBSERVED_TTL
         });
+        self.ignored_self
+            .retain(|_, seen| now.duration_since(*seen) <= OBSERVED_TTL);
         Ok(out)
     }
 
@@ -330,6 +357,9 @@ impl SocketCollector {
     }
 
     fn observe_close(&mut self, key: SocketKey) -> Option<ConnectionObservation> {
+        if self.ignored_self.remove(&key).is_some() {
+            return None;
+        }
         let now = Instant::now();
         if let Some(observed) = self.observed.get_mut(&key) {
             if observed.active {
@@ -373,6 +403,7 @@ impl SocketCollector {
 
     pub fn reset(&mut self) {
         self.observed.clear();
+        self.ignored_self.clear();
         self.events.clear();
         self.session = SessionCollectionStats::default();
         self.topology_changed = false;
@@ -391,15 +422,23 @@ impl SocketCollector {
         status.source = self.native_source;
         status.udp_remote = self.udp_remote;
         status.access_limited = self.access_limited;
+        status.truncated_sockets = self.truncated_sockets;
         status.observed_opens = self.session.opens;
         status.observed_closes = self.session.closes;
         status.recovered_owners = self.session.recovered_owners;
         status.unattributed_owner_gone = self.session.owner_gone;
         status.unattributed_ambiguous = self.session.ambiguous;
         status.unattributed_access_limited = self.session.access_limited;
-        if !self.native_warnings.is_empty() && status.status == "ready" {
+        let mut native_problems = self.native_warnings.clone();
+        if let Some(error) = &self.last_collection_error {
+            native_problems.push(error.clone());
+        }
+        if !native_problems.is_empty() {
+            if status.status != "ready" && !status.message.is_empty() {
+                native_problems.insert(0, status.message);
+            }
             status.status = "degraded";
-            status.message = self.native_warnings.join("; ");
+            status.message = native_problems.join("; ");
         }
         status
     }
@@ -485,5 +524,36 @@ mod tests {
         let (_, _, _, reused_is_new) =
             collector.attribute(&socket, vec![owner(10, "browser")], false);
         assert!(reused_is_new);
+    }
+
+    #[test]
+    fn close_event_for_known_self_socket_stays_hidden() {
+        let mut collector = SocketCollector::default();
+        let socket = key(41004);
+        collector
+            .ignored_self
+            .insert(socket.clone(), Instant::now());
+
+        assert!(collector.observe_close(socket.clone()).is_none());
+        assert!(!collector.observed.contains_key(&socket));
+    }
+
+    #[test]
+    fn collector_health_retains_and_clears_native_failures() {
+        let mut collector = SocketCollector {
+            last_collection_error: Some("temporary native failure".into()),
+            truncated_sockets: 4,
+            ..SocketCollector::default()
+        };
+
+        let degraded = collector.collection_status();
+        assert_eq!(degraded.status, "degraded");
+        assert!(degraded.message.contains("temporary native failure"));
+        assert_eq!(degraded.truncated_sockets, 4);
+
+        collector.last_collection_error = None;
+        collector.truncated_sockets = 0;
+        let recovered = collector.collection_status();
+        assert_eq!(recovered.status, "ready");
     }
 }

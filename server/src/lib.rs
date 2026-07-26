@@ -1,3 +1,4 @@
+mod app_icons;
 mod collect;
 mod dto;
 mod geo;
@@ -18,10 +19,10 @@ pub mod standalone {
     use std::{net::IpAddr, sync::Arc};
 
     pub use crate::dto::{
-        AppDto, AttributionStatsDto, CollectionDto, DestDto, DestinationNamingDto, HopDto,
-        MonitoringDto, NetworkExitDto, NetworkOriginDto, NetworkOriginEvidenceDto, ProcessDto,
-        SettingsDto, SnapshotDto, TraceDto, TraceStatsDto, TrafficGroupDto, TrafficRateDto,
-        UdpMonitoringDto,
+        AppDto, AttributionStatsDto, CapabilitiesDto, CollectionDto, DestDto, DestinationNamingDto,
+        HopDto, MonitoringDto, NetworkExitDto, NetworkOriginDto, NetworkOriginEvidenceDto,
+        NetworkTransitionDto, ProcessDto, SettingsDto, SnapshotDto, TraceDto, TraceStatsDto,
+        TrafficGroupDto, TrafficRateDto, UdpMonitoringDto,
     };
 
     use crate::monitor::Monitor;

@@ -1,13 +1,26 @@
-import type { GlobeHop, GlobePath, HopSelection, NetworkOrigin } from "./globe";
+import type {
+  GlobeHop,
+  GlobePath,
+  GlobeSegmentSelection,
+  HopSelection,
+  NetworkOrigin,
+} from "./globe";
 
 type InspectorOptions = {
   onClose: () => void;
-  onSelectRoute: (routeId: string) => void;
+  onSelectRoute: (routeId: string, instant: boolean) => void;
+  onTraceRoute: (path: GlobePath) => Promise<void>;
+  onHighlightHop: (hop: { pathId: string; ttl: number } | null) => void;
 };
 
 type InspectorState =
   | { kind: "closed" }
-  | { kind: "route"; routeId: string; lastRoute: GlobePath | null }
+  | {
+      kind: "route";
+      routeId: string;
+      lastRoute: GlobePath | null;
+      segment: Pick<GlobeSegmentSelection, "fromTtl" | "toTtl"> | null;
+    }
   | { kind: "node"; selection: HopSelection }
   | { kind: "origin"; origin: NetworkOrigin };
 
@@ -26,14 +39,28 @@ export class RouteInspector {
         this.close();
         return;
       }
+      const trace = (event.target as HTMLElement).closest<HTMLButtonElement>(
+        "[data-inspector-trace]",
+      );
+      if (trace) {
+        void this.traceSelectedRoute(trace);
+        return;
+      }
       const route = (event.target as HTMLElement).closest<HTMLElement>(
         "[data-inspector-route]",
       );
       if (route?.dataset.inspectorRoute) {
         this.showRoute(route.dataset.inspectorRoute);
-        this.options.onSelectRoute(route.dataset.inspectorRoute);
+        this.options.onSelectRoute(
+          route.dataset.inspectorRoute,
+          (event as MouseEvent).detail === 0,
+        );
       }
     });
+    host.addEventListener("pointerover", (event) => this.handleHopEnter(event));
+    host.addEventListener("pointerout", (event) => this.handleHopLeave(event));
+    host.addEventListener("focusin", (event) => this.handleHopEnter(event));
+    host.addEventListener("focusout", (event) => this.handleHopLeave(event));
   }
 
   get selectedRouteId(): string | null {
@@ -52,11 +79,22 @@ export class RouteInspector {
     this.render();
   }
 
-  showRoute(routeId: string, trigger?: HTMLElement | null): void {
+  showRoute(
+    routeId: string,
+    trigger?: HTMLElement | null,
+    segment: Pick<GlobeSegmentSelection, "fromTtl" | "toTtl"> | null = null,
+  ): void {
     if (trigger) this.returnFocus = trigger;
     const latest = this.paths.get(routeId) ?? null;
-    this.state = { kind: "route", routeId, lastRoute: latest };
+    this.state = { kind: "route", routeId, lastRoute: latest, segment };
     this.open();
+    if (segment) {
+      queueMicrotask(() => {
+        this.host
+          .querySelector<HTMLElement>(`[data-hop-ttl="${segment.fromTtl}"]`)
+          ?.scrollIntoView({ block: "nearest" });
+      });
+    }
   }
 
   showNode(selection: HopSelection, trigger?: HTMLElement | null): void {
@@ -77,6 +115,7 @@ export class RouteInspector {
     this.host.hidden = true;
     document.getElementById("app")?.classList.remove("inspector-open");
     this.options.onClose();
+    this.options.onHighlightHop(null);
     if (restoreFocus) this.returnFocus?.focus({ preventScroll: true });
     this.returnFocus = null;
   }
@@ -85,6 +124,39 @@ export class RouteInspector {
     this.host.hidden = false;
     document.getElementById("app")?.classList.add("inspector-open");
     this.render();
+  }
+
+  private async traceSelectedRoute(button: HTMLButtonElement): Promise<void> {
+    if (this.state.kind !== "route") return;
+    const path = this.paths.get(this.state.routeId) ?? this.state.lastRoute;
+    if (!path) return;
+    button.disabled = true;
+    button.textContent = "Queuing…";
+    try {
+      await this.options.onTraceRoute(path);
+      button.textContent = "Queued";
+    } catch {
+      button.disabled = false;
+      button.textContent = "Trace route";
+    }
+  }
+
+  private handleHopEnter(event: Event): void {
+    const row = (event.target as HTMLElement).closest<HTMLElement>("[data-hop-ttl]");
+    if (!row || this.state.kind !== "route") return;
+    const ttl = Number(row.dataset.hopTtl);
+    if (!Number.isFinite(ttl)) return;
+    row.classList.add("active");
+    this.options.onHighlightHop({ pathId: this.state.routeId, ttl });
+  }
+
+  private handleHopLeave(event: Event): void {
+    const row = (event.target as HTMLElement).closest<HTMLElement>("[data-hop-ttl]");
+    if (!row) return;
+    const next = (event as FocusEvent).relatedTarget as Node | null;
+    if (next && row.contains(next)) return;
+    row.classList.remove("active");
+    this.options.onHighlightHop(null);
   }
 
   private render(): void {
@@ -106,7 +178,11 @@ export class RouteInspector {
       );
       return;
     }
-    this.host.innerHTML = renderRoute(route, !this.paths.has(this.state.routeId));
+    this.host.innerHTML = renderRoute(
+      route,
+      !this.paths.has(this.state.routeId),
+      this.state.segment,
+    );
   }
 }
 
@@ -237,7 +313,11 @@ function renderNodeChoices(
   );
 }
 
-function renderRoute(path: GlobePath, inactive: boolean): string {
+function renderRoute(
+  path: GlobePath,
+  inactive: boolean,
+  segment: Pick<GlobeSegmentSelection, "fromTtl" | "toTtl"> | null,
+): string {
   const tracePending = path.status === "running" || path.status === "queued";
   const answered = path.hops.filter((hop) => hop.addr != null).length;
   const located = path.hops.filter((hop) => hop.lat != null && hop.lon != null).length;
@@ -248,21 +328,33 @@ function renderRoute(path: GlobePath, inactive: boolean): string {
     ? "Target reached"
     : path.status === "running" || path.status === "queued"
       ? path.status
+      : path.status === "deferred"
+        ? "Not automatically traced"
       : path.status === "failed"
         ? "Trace failed"
         : "Partial route";
-  const timeline = renderTimeline(path);
+  const appIcon = path.appIconUrl
+    ? `<span class="app-icon-shell route-app-icon" style="--app-color:${path.color}"><span class="app-icon-fallback"></span><img class="app-icon-image" src="${escapeHtml(path.appIconUrl)}" alt="" decoding="async"><i></i></span>`
+    : `<i style="background:${path.color};box-shadow:0 0 10px ${path.color}"></i>`;
+  const freshnessNotice = path.freshness === "refreshing"
+    ? `<div class="route-freshness refreshing">Network changed · refreshing this path</div>`
+    : path.freshness === "stale"
+      ? `<div class="route-freshness stale">Showing the last known path · refresh did not complete</div>`
+      : "";
+  const timeline = renderTimeline(path, segment);
   const body = `<div class="inspector-body">
     <section class="route-identity">
-      <div class="route-app"><i style="background:${path.color};box-shadow:0 0 10px ${path.color}"></i>${escapeHtml(path.app)}</div>
+      <div class="route-app">${appIcon}${escapeHtml(path.app)}</div>
       <h3>${escapeHtml(path.host)}</h3>
       <code>${escapeHtml(path.ip)}:${path.port} · ${escapeHtml(path.protocol)}</code>
       ${renderDomainEvidence(path)}
+      ${freshnessNotice}
       ${inactive ? `<div class="inactive-notice">No longer active · showing the last observed route</div>` : ""}
     </section>
+    ${path.status === "deferred" ? `<div class="route-actions"><button class="btn primary sm" type="button" data-inspector-trace>Trace route</button><span>UDP-only and one-off destinations are measured on demand.</span></div>` : ""}
     ${tracePending ? `<div class="trace-incomplete" role="status">
       <span class="trace-progress-pulse" aria-hidden="true"></span>
-      <div><strong>${path.status === "running" ? "Traceroute still running" : "Waiting to start traceroute"}</strong><span>This route is incomplete. Hops and locations may change as replies arrive.</span></div>
+      <div><strong>${path.status === "running" ? "Traceroute still running" : "Waiting to start traceroute"}</strong><span>Traceroutes take a little time. Hops and locations will fill in as replies arrive.</span></div>
     </div>` : ""}
     <section class="route-metrics">
       <div><span>Trace</span><strong class="${stateClass}">${escapeHtml(stateText)}</strong></div>
@@ -290,10 +382,15 @@ function renderDomainEvidence(path: GlobePath): string {
   return `<div class="location-evidence destination-evidence"><span class="confidence ${escapeHtml(confidence)}">${escapeHtml(label)}</span><span>${escapeHtml(path.domainSource)}${escapeHtml(alternatives)}</span></div>`;
 }
 
-function renderTimeline(path: GlobePath): string {
+function renderTimeline(
+  path: GlobePath,
+  segment: Pick<GlobeSegmentSelection, "fromTtl" | "toTtl"> | null,
+): string {
   if (path.hops.length === 0) {
     const message = path.status === "queued" || path.status === "running"
       ? `Traceroute is ${path.status}…`
+      : path.status === "deferred"
+        ? "This UDP-only or low-signal destination was captured but not automatically traced."
       : "No hop responses were recorded.";
     return `<div class="inspector-empty">${escapeHtml(message)}</div>`;
   }
@@ -317,12 +414,18 @@ function renderTimeline(path: GlobePath): string {
       const networkKey = networkName(hop);
       const showNetwork = hasAsn && networkKey !== previousNetwork;
       previousNetwork = networkKey;
-      return `${showNetwork ? `<li class="network-boundary"><span>${escapeHtml(networkKey)}</span></li>` : ""}${renderHop(path, hop, hop.ttl === firstPublicTtl)}`;
+      const inSegment = !!segment && hop.ttl >= segment.fromTtl && hop.ttl <= segment.toTtl;
+      return `${showNetwork ? `<li class="network-boundary"><span>${escapeHtml(networkKey)}</span></li>` : ""}${renderHop(path, hop, hop.ttl === firstPublicTtl, inSegment)}`;
     })
     .join("")}</ol>`;
 }
 
-function renderHop(path: GlobePath, hop: GlobeHop, isFirstPublic: boolean): string {
+function renderHop(
+  path: GlobePath,
+  hop: GlobeHop,
+  isFirstPublic: boolean,
+  inSegment: boolean,
+): string {
   const isTarget = path.reachedTarget && hop.addr === path.ip;
   const timedOut = hop.addr == null;
   const location = hop.city
@@ -339,8 +442,9 @@ function renderHop(path: GlobePath, hop: GlobeHop, isFirstPublic: boolean): stri
     hop.geoConfidence ?? null,
     hop.geoNote ?? null,
   );
-  const classes = [timedOut ? "timeout" : "", isTarget ? "target" : ""].filter(Boolean).join(" ");
-  return `<li class="hop-row ${classes}">
+  const mapped = hop.lat != null && hop.lon != null;
+  const classes = [timedOut ? "timeout" : "", isTarget ? "target" : "", inSegment ? "segment-active" : ""].filter(Boolean).join(" ");
+  return `<li class="hop-row ${classes}" data-hop-ttl="${hop.ttl}"${mapped ? ` tabindex="0" aria-label="Highlight hop ${hop.ttl} on globe"` : ""}>
     <div class="hop-marker"><span>${hop.ttl}</span></div>
     <div class="hop-copy">
       <div class="hop-primary"><strong>${escapeHtml(primary)}</strong><b>${hop.rttMs != null ? `${Math.round(hop.rttMs)}ms` : "—"}</b></div>

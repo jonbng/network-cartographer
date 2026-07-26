@@ -219,12 +219,16 @@ impl AppState {
                     protocol: conn.protocol,
                     process_ids: processes.iter().map(|process| process.id.clone()).collect(),
                     hit_count: 0,
+                    active_observations: 0,
                     first_seen: now,
                     last_seen: now,
                 });
             if conn.is_new {
                 dest.hit_count += 1;
                 entry.hits_per_sec += 1.0 / dt;
+            }
+            if active {
+                dest.active_observations = dest.active_observations.saturating_add(1);
             }
             dest.last_seen = now;
             dest.protocol = conn.protocol;
@@ -338,7 +342,32 @@ impl AppState {
         &self.unattributed
     }
 
-    /// Unique remote IPs currently retained (for traceroute enqueue).
+    /// Attributed remote IPs with enough TCP evidence for automatic
+    /// traceroute. UDP-only destinations remain available for explicit
+    /// tracing without filling the background queue.
+    pub fn auto_trace_ips(&self) -> Vec<IpAddr> {
+        let mut evidence: HashMap<IpAddr, (u64, u64)> = HashMap::new();
+        for app in self.apps.values() {
+            for dest in app.destinations.values() {
+                if matches!(dest.protocol, Protocol::Tcp) {
+                    let totals = evidence.entry(dest.remote.ip()).or_default();
+                    totals.0 = totals.0.saturating_add(dest.hit_count);
+                    totals.1 = totals.1.saturating_add(dest.active_observations);
+                }
+            }
+        }
+        let mut ips: Vec<_> = evidence
+            .into_iter()
+            .filter_map(|(ip, (opens, live_observations))| {
+                (opens >= 2 || live_observations >= 2).then_some(ip)
+            })
+            .collect();
+        ips.sort();
+        ips
+    }
+
+    /// Every retained remote IP. Explicit "Trace all" actions use this
+    /// unfiltered set, including low-signal and unattributed destinations.
     pub fn unique_remote_ips(&self) -> Vec<IpAddr> {
         let mut set = HashSet::new();
         for app in self.apps.values() {
@@ -567,5 +596,97 @@ mod tests {
         assert_eq!(state.unattributed().current_connections, 0);
         assert_eq!(state.unattributed().connection_hits(), 1);
         assert_eq!(state.missing_pid_count, 0);
+    }
+
+    #[test]
+    fn one_off_attributed_destination_is_deferred_but_retained() {
+        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut hostnames = HostnameCache::new();
+        state.ingest(
+            vec![connection(AttributionSource::Direct, true)],
+            &mut hostnames,
+        );
+
+        assert!(state.auto_trace_ips().is_empty());
+        assert_eq!(
+            state.unique_remote_ips(),
+            vec!["203.0.113.10".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn persistent_socket_qualifies_on_second_live_observation() {
+        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut hostnames = HostnameCache::new();
+        let first = connection(AttributionSource::Direct, true);
+        let mut second = first.clone();
+        second.connection.is_new = false;
+
+        state.ingest(vec![first], &mut hostnames);
+        assert!(state.auto_trace_ips().is_empty());
+        state.ingest(vec![second], &mut hostnames);
+
+        assert_eq!(
+            state.auto_trace_ips(),
+            vec!["203.0.113.10".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn repeated_short_connections_qualify_by_remote_ip() {
+        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut hostnames = HostnameCache::new();
+        let mut first = connection(AttributionSource::Direct, true);
+        first.active = false;
+        let mut second = first.clone();
+        second.connection.local = "127.0.0.1:45124".parse().unwrap();
+
+        state.ingest(vec![first], &mut hostnames);
+        assert!(state.auto_trace_ips().is_empty());
+        state.ingest(vec![second], &mut hostnames);
+
+        assert_eq!(
+            state.auto_trace_ips(),
+            vec!["203.0.113.10".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn udp_only_destination_remains_deferred_despite_repeated_evidence() {
+        let mut state = AppState::new(Duration::from_secs(45), false, true);
+        let mut hostnames = HostnameCache::new();
+        let mut first = connection(AttributionSource::Direct, true);
+        first.connection.protocol = Protocol::Udp;
+        let mut second = first.clone();
+        second.connection.is_new = false;
+        let third = second.clone();
+        let fourth = second.clone();
+
+        state.ingest(vec![first], &mut hostnames);
+        assert!(state.auto_trace_ips().is_empty());
+        state.ingest(vec![second], &mut hostnames);
+        assert!(state.auto_trace_ips().is_empty());
+        state.ingest(vec![third], &mut hostnames);
+        assert!(state.auto_trace_ips().is_empty());
+        state.ingest(vec![fourth], &mut hostnames);
+
+        assert!(state.auto_trace_ips().is_empty());
+    }
+
+    #[test]
+    fn unattributed_observations_never_supply_auto_trace_evidence() {
+        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut hostnames = HostnameCache::new();
+        let first = connection(AttributionSource::Unattributed, true);
+        let mut second = first.clone();
+        second.connection.local = "127.0.0.1:45124".parse().unwrap();
+
+        state.ingest(vec![first, second], &mut hostnames);
+
+        assert!(state.auto_trace_ips().is_empty());
+        assert_eq!(
+            state.unique_remote_ips(),
+            vec!["203.0.113.10".parse::<IpAddr>().unwrap()]
+        );
     }
 }

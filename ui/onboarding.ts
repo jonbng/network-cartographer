@@ -1,10 +1,13 @@
 const ONBOARDING_KEY = "network-cartographer.onboarding.v1";
 
 const TIPS = [
+  "This is a near-live view · connections and routes appear after a short delay",
+  "Want to see the globe light up? Open websites hosted in a few different countries",
   "Drag to orbit the globe · scroll to zoom (globe only, not the page)",
   "Pink ★ markers are confirmed destinations · amber ◌ markers are partial routes",
+  "Amber dashes bridge missing evidence · they move only while traceroute is measuring",
   "Click an app to focus its paths · Shift-click to multi-select",
-  "Select a destination or globe node to inspect hops, networks, and location confidence",
+  "Select a route or node to inspect hops, networks, and location confidence",
 ];
 
 function mountTips(host: HTMLElement): void {

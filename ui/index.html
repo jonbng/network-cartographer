@@ -6,6 +6,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Network Cartographer</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -54,13 +55,6 @@
         <div class="sidebar-list" id="app-list"></div>
 
         <div class="sidebar-foot">
-          <div class="legend-row">
-            <span class="legend-item"><i class="lg-dot origin"></i> Network exit</span>
-            <span class="legend-item"><i class="lg-dot hop"></i> Relay</span>
-            <span class="legend-item"><i class="lg-dot dest"></i> Destination</span>
-            <span class="legend-item"><i class="lg-dot partial"></i> Last mapped</span>
-            <span class="legend-item"><i class="lg-line gap"></i> Unmapped gap</span>
-          </div>
           <button type="button" id="btn-about" class="about-button">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 11v5M12 8.1v.1"></path></svg>
             <span>About &amp; privacy</span>
@@ -81,7 +75,8 @@
         <div class="map-heading">
           <div class="heading-kicker"><span>02</span> Global traffic map</div>
           <h2>Live internet topology</h2>
-          <p class="subtitle" id="globe-status">Acquiring network routes…</p>
+          <p class="subtitle" id="globe-status">Near-live view · new activity appears after a short delay</p>
+          <p class="session-summary" id="session-summary" hidden></p>
           <button id="network-origin" class="network-origin-readout locating" type="button" aria-label="Inspect primary network exit">
             <span class="origin-readout-beacon" aria-hidden="true"><i></i></span>
             <span class="origin-readout-copy">
@@ -100,7 +95,7 @@
             <span class="trace-progress-pulse" aria-hidden="true"></span>
             <span class="trace-progress-copy">
               <strong id="trace-progress-title">Traceroute in progress</strong>
-              <small id="trace-progress-detail">Current map is incomplete</small>
+              <small id="trace-progress-detail">Results arrive gradually · the map fills in as replies return</small>
             </span>
             <span id="trace-progress-count" class="trace-progress-count"></span>
           </div>
@@ -159,8 +154,8 @@
               <span><strong>Session archive</strong><small>Write local JSONL snapshots every minute</small></span>
               <input type="checkbox" id="tog-history" />
             </label>
-            <label class="setting-row">
-              <span><strong>Traffic rates</strong><small>Native per-app upload and download</small></span>
+            <label class="setting-row" id="traffic-setting">
+              <span><strong>Traffic rates</strong><small id="traffic-status">Native per-app upload and download</small></span>
               <input type="checkbox" id="tog-enhanced" />
             </label>
             <label class="setting-row">
@@ -179,10 +174,54 @@
         </details>
       </div>
 
+      <div class="overlay map-key" aria-label="Map key">
+        <span class="map-key-title">Map key</span>
+        <span class="map-key-item"><i class="route-key observed"></i><span>Observed</span></span>
+        <span class="map-key-item" title="Route evidence is missing"><i class="route-key unmapped"></i><span>Missing</span></span>
+        <span class="map-key-item" title="Moving amber dashes mean traceroute is measuring this unresolved span"><i class="route-key unmapped active"></i><span>Measuring</span></span>
+        <span class="map-key-item" title="Moving pulses show route direction, not traffic volume"><i class="route-key direction"></i><span>Direction, not traffic</span></span>
+        <details class="node-key">
+          <summary>Nodes</summary>
+          <div class="node-key-popover">
+            <span class="legend-item"><i class="lg-dot origin"></i> Network exit</span>
+            <span class="legend-item"><i class="lg-dot hop"></i> Relay</span>
+            <span class="legend-item"><i class="lg-dot dest"></i> Destination</span>
+            <span class="legend-item"><i class="lg-dot partial"></i> Last mapped</span>
+          </div>
+        </details>
+      </div>
+
       <footer class="overlay footer">
-        <span id="status-msg" class="status-message">Starting monitor…</span>
-        <span class="hint"><kbd>drag</kbd> orbit <i></i> <kbd>scroll</kbd> zoom <i></i> select a node to inspect</span>
+        <details class="health-menu" id="health-menu">
+          <summary class="health-summary">
+            <i id="health-dot" class="health-dot waiting" aria-hidden="true"></i>
+            <span id="status-msg" class="status-message">Starting monitor…</span>
+          </summary>
+          <div class="health-popover" aria-label="System health">
+            <div class="health-popover-head"><span>Session health</span><strong id="health-overall">Starting</strong></div>
+            <div class="health-row"><span>Collector</span><strong id="health-collector">Starting</strong></div>
+            <div class="health-row"><span>Attribution</span><strong id="health-attribution">Waiting</strong></div>
+            <div class="health-row"><span>Route mapping</span><strong id="health-routes">Waiting</strong></div>
+            <div class="health-row"><span>Geolocation</span><strong id="health-geo">Waiting</strong></div>
+            <div class="health-row"><span>Browser connection</span><strong id="health-stream">Connecting</strong></div>
+            <p id="health-detail" class="health-detail" hidden></p>
+          </div>
+        </details>
+        <span class="hint"><kbd>drag</kbd> orbit <i></i> <kbd>scroll</kbd> zoom <i></i> select a route or node to inspect</span>
       </footer>
+
+      <div id="first-route-reveal" class="overlay first-route-reveal" role="status" aria-live="polite" hidden>
+        <span class="reveal-kicker">First route mapped</span>
+        <strong id="first-route-title"></strong>
+        <small id="first-route-detail"></small>
+      </div>
+
+      <button id="network-transition" class="overlay network-transition" type="button" aria-live="polite" hidden>
+        <span class="transition-kicker"><i aria-hidden="true"></i> Network transition</span>
+        <strong id="transition-title"></strong>
+        <small id="transition-detail"></small>
+        <span class="transition-action">Inspect exit →</span>
+      </button>
 
       <div id="about-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="about-title">
         <div class="modal-card">

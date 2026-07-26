@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::app_icons::{app_icon_url, AppIconStore};
 use crate::collect::{
     CollectionStatus, DestinationNamingStatus, NativeTrafficStatus, UdpCollectionStatus,
 };
@@ -24,6 +25,7 @@ pub struct SnapshotDto {
     pub collection: CollectionDto,
     pub destination_naming: DestinationNamingDto,
     pub udp_monitoring: UdpMonitoringDto,
+    pub capabilities: CapabilitiesDto,
     pub external_only: bool,
     pub include_udp: bool,
     pub traces_enabled: bool,
@@ -42,6 +44,7 @@ pub struct NetworkOriginDto {
     pub exit: Option<NetworkExitDto>,
     pub assessment: String,
     pub evidence: Vec<NetworkOriginEvidenceDto>,
+    pub transition: Option<NetworkTransitionDto>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +60,16 @@ pub struct NetworkExitDto {
     pub source: String,
     pub confidence: Option<f64>,
     pub age_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkTransitionDto {
+    pub id: u64,
+    pub status: String,
+    pub age_seconds: u64,
+    pub previous_exit: Option<NetworkExitDto>,
+    pub current_exit: Option<NetworkExitDto>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,9 +91,16 @@ pub struct TraceStatsDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CapabilitiesDto {
+    pub traffic_rates: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppDto {
     pub id: String,
     pub name: String,
+    pub icon_url: Option<String>,
     pub path: Option<String>,
     pub pids: Vec<u32>,
     pub processes: Vec<ProcessDto>,
@@ -157,6 +177,7 @@ pub struct CollectionDto {
     pub message: String,
     pub udp_remote: bool,
     pub access_limited: usize,
+    pub truncated_sockets: usize,
     pub poll_phase: String,
     pub effective_poll_interval_ms: u64,
     pub observed_opens: u64,
@@ -211,6 +232,7 @@ pub struct DestDto {
 #[serde(rename_all = "camelCase")]
 pub struct TraceDto {
     pub status: String,
+    pub freshness: String,
     pub label: String,
     pub hops: Vec<HopDto>,
     pub error: Option<String>,
@@ -296,14 +318,16 @@ pub struct SnapshotContext<'a> {
     pub destination_naming: &'a DestinationNamingStatus,
     pub udp_status: &'a UdpCollectionStatus,
     pub network_origin: &'a NetworkOriginView,
+    pub app_icons: &'a AppIconStore,
 }
 
 pub fn build_snapshot(state: &AppState, context: &SnapshotContext<'_>) -> SnapshotDto {
     let ts = context.traces.stats();
+    let auto_trace_ips: std::collections::HashSet<_> = state.auto_trace_ips().into_iter().collect();
     let apps: Vec<AppDto> = state
         .sorted_apps()
         .into_iter()
-        .map(|app| app_to_dto(app, context))
+        .map(|app| app_to_dto(app, context, &auto_trace_ips))
         .collect();
     let attributed = state.attribution.direct + state.attribution.recovered;
     let total = attributed + state.attribution.unattributed;
@@ -318,7 +342,7 @@ pub fn build_snapshot(state: &AppState, context: &SnapshotContext<'_>) -> Snapsh
             destinations: unattributed
                 .sorted_destinations()
                 .into_iter()
-                .map(|dest| dest_to_dto(unattributed, dest, context))
+                .map(|dest| dest_to_dto(unattributed, dest, context, &auto_trace_ips))
                 .collect(),
         })
     };
@@ -355,6 +379,7 @@ pub fn build_snapshot(state: &AppState, context: &SnapshotContext<'_>) -> Snapsh
             message: context.collection_status.message.clone(),
             udp_remote: context.collection_status.udp_remote,
             access_limited: context.collection_status.access_limited,
+            truncated_sockets: context.collection_status.truncated_sockets,
             poll_phase: context.collection_status.poll_phase.into(),
             effective_poll_interval_ms: context.collection_status.effective_poll_interval_ms,
             observed_opens: context.collection_status.observed_opens,
@@ -376,6 +401,9 @@ pub fn build_snapshot(state: &AppState, context: &SnapshotContext<'_>) -> Snapsh
             message: context.destination_naming.message.clone(),
         },
         udp_monitoring: udp_monitoring_to_dto(context.settings.include_udp, context.udp_status),
+        capabilities: CapabilitiesDto {
+            traffic_rates: cfg!(target_os = "linux"),
+        },
         external_only: state.external_only,
         include_udp: state.include_udp,
         traces_enabled: context.traces.enabled(),
@@ -401,18 +429,7 @@ fn build_network_origin(
     apps: &[AppDto],
     unattributed: Option<&TrafficGroupDto>,
 ) -> NetworkOriginDto {
-    let hosted = origin.hosted.as_ref().map(|exit| NetworkExitDto {
-        ip: Some(exit.ip.clone()),
-        city: exit.city.clone(),
-        country: exit.country.clone(),
-        lat: exit.lat,
-        lon: exit.lon,
-        asn: exit.asn,
-        organization: exit.organization.clone(),
-        source: "hosted-egress".into(),
-        confidence: exit.confidence,
-        age_seconds: exit.observed_at.elapsed().as_secs(),
-    });
+    let hosted = origin.hosted.as_ref().map(exit_to_dto);
     let fallback = hosted
         .is_none()
         .then(|| trace_origin(apps, unattributed))
@@ -438,6 +455,31 @@ fn build_network_origin(
                 label: item.label.clone(),
             })
             .collect(),
+        transition: origin
+            .transition
+            .as_ref()
+            .map(|transition| NetworkTransitionDto {
+                id: transition.id,
+                status: transition.status.into(),
+                age_seconds: transition.detected_at.elapsed().as_secs(),
+                previous_exit: transition.previous.as_ref().map(exit_to_dto),
+                current_exit: transition.current.as_ref().map(exit_to_dto),
+            }),
+    }
+}
+
+fn exit_to_dto(exit: &crate::network_origin::ExitObservation) -> NetworkExitDto {
+    NetworkExitDto {
+        ip: Some(exit.ip.clone()),
+        city: exit.city.clone(),
+        country: exit.country.clone(),
+        lat: exit.lat,
+        lon: exit.lon,
+        asn: exit.asn,
+        organization: exit.organization.clone(),
+        source: "hosted-egress".into(),
+        confidence: exit.confidence,
+        age_seconds: exit.observed_at.elapsed().as_secs(),
     }
 }
 
@@ -481,6 +523,9 @@ fn collect_trace_origins<'a>(
     candidates: &mut Vec<TraceOriginCandidate<'a>>,
 ) {
     for destination in destinations {
+        if destination.trace.freshness != "fresh" {
+            continue;
+        }
         if let Some(hop) = destination.trace.hops.iter().find(|hop| {
             hop.addr.is_some()
                 && hop.lat.is_some()
@@ -544,11 +589,15 @@ fn udp_monitoring_to_dto(enabled: bool, status: &UdpCollectionStatus) -> UdpMoni
     }
 }
 
-fn app_to_dto(app: &AppEntry, context: &SnapshotContext<'_>) -> AppDto {
+fn app_to_dto(
+    app: &AppEntry,
+    context: &SnapshotContext<'_>,
+    auto_trace_ips: &std::collections::HashSet<std::net::IpAddr>,
+) -> AppDto {
     let destinations: Vec<DestDto> = app
         .sorted_destinations()
         .into_iter()
-        .map(|d| dest_to_dto(app, d, context))
+        .map(|d| dest_to_dto(app, d, context, auto_trace_ips))
         .collect();
 
     let name = display_name_for(app);
@@ -557,6 +606,7 @@ fn app_to_dto(app: &AppEntry, context: &SnapshotContext<'_>) -> AppDto {
     AppDto {
         id,
         name,
+        icon_url: app_icon_url(context.app_icons, app.path.as_deref()),
         path: app.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
         pids: app.pids.iter().copied().collect(),
         processes: app
@@ -623,7 +673,12 @@ fn monitoring_to_dto(status: &NativeTrafficStatus) -> MonitoringDto {
     }
 }
 
-fn dest_to_dto(app: &AppEntry, d: &DestStats, context: &SnapshotContext<'_>) -> DestDto {
+fn dest_to_dto(
+    app: &AppEntry,
+    d: &DestStats,
+    context: &SnapshotContext<'_>,
+    auto_trace_ips: &std::collections::HashSet<std::net::IpAddr>,
+) -> DestDto {
     let status = context.traces.get(d.remote.ip());
     let ip = d.remote.ip();
     let asn_info = context.asn.lookup(ip);
@@ -666,6 +721,7 @@ fn dest_to_dto(app: &AppEntry, d: &DestStats, context: &SnapshotContext<'_>) -> 
             context.path_geo,
             context.asn,
             context.settings,
+            context.traces.enabled() && !auto_trace_ips.contains(&ip),
         ),
     }
 }
@@ -690,10 +746,21 @@ fn trace_to_dto(
     path_geo: &PathGeoCache,
     asn: &AsnDb,
     settings: &SettingsDto,
+    deferred: bool,
 ) -> TraceDto {
     match status {
+        TraceStatus::Idle if deferred => TraceDto {
+            status: "deferred".into(),
+            freshness: "fresh".into(),
+            label: "not automatically traced".into(),
+            hops: vec![],
+            error: None,
+            reached_target: false,
+            target_rtt_ms: None,
+        },
         TraceStatus::Idle => TraceDto {
             status: "idle".into(),
+            freshness: "fresh".into(),
             label: "·".into(),
             hops: vec![],
             error: None,
@@ -702,6 +769,7 @@ fn trace_to_dto(
         },
         TraceStatus::Queued => TraceDto {
             status: "queued".into(),
+            freshness: "fresh".into(),
             label: "queued".into(),
             hops: vec![],
             error: None,
@@ -710,6 +778,7 @@ fn trace_to_dto(
         },
         TraceStatus::Running => TraceDto {
             status: "running".into(),
+            freshness: "fresh".into(),
             label: "tracing…".into(),
             hops: vec![],
             error: None,
@@ -718,39 +787,60 @@ fn trace_to_dto(
         },
         TraceStatus::Failed { message, .. } => TraceDto {
             status: "failed".into(),
+            freshness: "fresh".into(),
             label: format!("fail:{message}"),
             hops: vec![],
             error: Some(message),
             reached_target: false,
             target_rtt_ms: None,
         },
-        TraceStatus::Done(r) => {
-            let reached_target = r.reached_target();
-            let target_rtt_ms = r.target_rtt_ms();
-            let label = match (reached_target, target_rtt_ms, r.final_rtt_ms()) {
-                (true, Some(ms), _) => format!("hops {}  {:.0}ms", r.hop_count(), ms),
-                (true, None, _) => format!("hops {}  target reached", r.hop_count()),
-                (false, _, Some(ms)) => format!("partial  last reply {:.0}ms", ms),
-                (false, _, None) => "partial trace".into(),
-            };
-            let geo_hops = path_geo.get_or_compute(&r.hops, geo);
-            let hops = geo_hops
-                .into_iter()
-                .filter_map(|h| geo_hop_to_dto(h, asn, settings))
-                .collect();
-            TraceDto {
-                status: if r.hops.is_empty() {
-                    "failed".into()
-                } else {
-                    "done".into()
-                },
-                label,
-                hops,
-                error: r.error.clone(),
-                reached_target,
-                target_rtt_ms,
-            }
+        TraceStatus::Done(r) => completed_trace_to_dto(r, "fresh", geo, path_geo, asn, settings),
+        TraceStatus::Refreshing(r) => {
+            completed_trace_to_dto(r, "refreshing", geo, path_geo, asn, settings)
         }
+        TraceStatus::Stale {
+            result, message, ..
+        } => {
+            let mut dto = completed_trace_to_dto(result, "stale", geo, path_geo, asn, settings);
+            dto.error = Some(message);
+            dto
+        }
+    }
+}
+
+fn completed_trace_to_dto(
+    result: crate::trace::TraceResult,
+    freshness: &str,
+    geo: &GeoCache,
+    path_geo: &PathGeoCache,
+    asn: &AsnDb,
+    settings: &SettingsDto,
+) -> TraceDto {
+    let reached_target = result.reached_target();
+    let target_rtt_ms = result.target_rtt_ms();
+    let label = match (reached_target, target_rtt_ms, result.final_rtt_ms()) {
+        (true, Some(ms), _) => format!("hops {}  {:.0}ms", result.hop_count(), ms),
+        (true, None, _) => format!("hops {}  target reached", result.hop_count()),
+        (false, _, Some(ms)) => format!("partial  last reply {:.0}ms", ms),
+        (false, _, None) => "partial trace".into(),
+    };
+    let geo_hops = path_geo.get_or_compute(&result.hops, geo);
+    let hops = geo_hops
+        .into_iter()
+        .filter_map(|hop| geo_hop_to_dto(hop, asn, settings))
+        .collect();
+    TraceDto {
+        status: if result.hops.is_empty() {
+            "failed".into()
+        } else {
+            "done".into()
+        },
+        freshness: freshness.into(),
+        label,
+        hops,
+        error: result.error,
+        reached_target,
+        target_rtt_ms,
     }
 }
 
@@ -842,6 +932,7 @@ mod tests {
     fn trace_accuracy_fields_use_frontend_names() {
         let trace = TraceDto {
             status: "done".into(),
+            freshness: "fresh".into(),
             label: "hops 4  12ms".into(),
             hops: vec![],
             error: None,
@@ -851,7 +942,42 @@ mod tests {
         let value = serde_json::to_value(trace).unwrap();
         assert_eq!(value["reachedTarget"], true);
         assert_eq!(value["targetRttMs"], 12.0);
+        assert_eq!(value["freshness"], "fresh");
         assert!(value.get("reached_target").is_none());
+    }
+
+    #[test]
+    fn macos_health_fields_use_frontend_names() {
+        let capabilities = serde_json::to_value(CapabilitiesDto {
+            traffic_rates: false,
+        })
+        .unwrap();
+        assert_eq!(capabilities["trafficRates"], false);
+        assert!(capabilities.get("traffic_rates").is_none());
+
+        let collection = CollectionDto {
+            mode: "adaptive-polling".into(),
+            source: "macos-libproc".into(),
+            captures_opens: false,
+            captures_closes: false,
+            dropped_events: 0,
+            status: "degraded".into(),
+            message: "limited".into(),
+            udp_remote: true,
+            access_limited: 2,
+            truncated_sockets: 7,
+            poll_phase: "active".into(),
+            effective_poll_interval_ms: 250,
+            observed_opens: 0,
+            observed_closes: 0,
+            recovered_owners: 0,
+            unattributed_owner_gone: 0,
+            unattributed_ambiguous: 0,
+            unattributed_access_limited: 0,
+        };
+        let value = serde_json::to_value(collection).unwrap();
+        assert_eq!(value["truncatedSockets"], 7);
+        assert!(value.get("truncated_sockets").is_none());
     }
 
     #[test]
@@ -872,9 +998,17 @@ mod tests {
             }),
             assessment: "no_evidence".into(),
             evidence: Vec::new(),
+            transition: Some(NetworkTransitionDto {
+                id: 4,
+                status: "ready".into(),
+                age_seconds: 2,
+                previous_exit: None,
+                current_exit: None,
+            }),
         };
         let value = serde_json::to_value(origin).unwrap();
         assert_eq!(value["exit"]["ageSeconds"], 3);
+        assert_eq!(value["transition"]["ageSeconds"], 2);
         assert!(value["exit"].get("age_seconds").is_none());
     }
 

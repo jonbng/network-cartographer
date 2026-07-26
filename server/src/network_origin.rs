@@ -39,6 +39,16 @@ pub struct NetworkOriginView {
     pub hosted_attempted: bool,
     pub assessment: &'static str,
     pub evidence: Vec<OriginEvidence>,
+    pub transition: Option<NetworkTransitionView>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NetworkTransitionView {
+    pub id: u64,
+    pub status: &'static str,
+    pub detected_at: Instant,
+    pub previous: Option<ExitObservation>,
+    pub current: Option<ExitObservation>,
 }
 
 #[derive(Debug)]
@@ -48,6 +58,10 @@ struct CachedOrigin {
     assessment: &'static str,
     evidence: Vec<OriginEvidence>,
     signature: String,
+    candidate_signature: Option<String>,
+    candidate_count: u8,
+    next_transition_id: u64,
+    transition: Option<NetworkTransitionView>,
 }
 
 pub struct NetworkOrigin {
@@ -63,6 +77,10 @@ impl NetworkOrigin {
                 assessment: "unknown",
                 evidence: Vec::new(),
                 signature: String::new(),
+                candidate_signature: None,
+                candidate_count: 0,
+                next_transition_id: 1,
+                transition: None,
             }),
         }
     }
@@ -71,13 +89,54 @@ impl NetworkOrigin {
     /// proxy configuration changed and the public exit should be rechecked.
     pub fn refresh_local(&self) -> bool {
         let local = inspect_local_routing();
+        self.apply_local(local)
+    }
+
+    fn apply_local(&self, local: LocalRouting) -> bool {
         let signature = local.signature();
         if let Ok(mut state) = self.state.lock() {
-            let changed = !state.signature.is_empty() && state.signature != signature;
+            if state.signature.is_empty() {
+                state.assessment = local.assessment;
+                state.evidence = local.evidence;
+                state.signature = signature;
+                return false;
+            }
+            if state.signature == signature {
+                state.candidate_signature = None;
+                state.candidate_count = 0;
+                state.assessment = local.assessment;
+                state.evidence = local.evidence;
+                return false;
+            }
+
+            if state.candidate_signature.as_deref() == Some(signature.as_str()) {
+                state.candidate_count = state.candidate_count.saturating_add(1);
+            } else {
+                state.candidate_signature = Some(signature.clone());
+                state.candidate_count = 1;
+                return false;
+            }
+            if state.candidate_count < 2 {
+                return false;
+            }
+
+            let transition_id = state.next_transition_id;
+            state.next_transition_id = state.next_transition_id.wrapping_add(1).max(1);
+            let previous = state.hosted.take();
+            state.hosted_attempted = false;
+            state.transition = Some(NetworkTransitionView {
+                id: transition_id,
+                status: "detecting",
+                detected_at: Instant::now(),
+                previous,
+                current: None,
+            });
             state.assessment = local.assessment;
             state.evidence = local.evidence;
             state.signature = signature;
-            changed
+            state.candidate_signature = None;
+            state.candidate_count = 0;
+            true
         } else {
             false
         }
@@ -89,37 +148,65 @@ impl NetworkOrigin {
             state.hosted_attempted = true;
             match result {
                 Ok(exit) => {
-                    state.hosted = Some(exit);
+                    state.hosted = Some(exit.clone());
+                    if let Some(transition) = state.transition.as_mut() {
+                        transition.status = "ready";
+                        transition.current = Some(exit);
+                    }
                     Ok(())
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    if let Some(transition) = state.transition.as_mut() {
+                        transition.status = "unavailable";
+                    }
+                    Err(error)
+                }
             }
         } else {
             Err("network-origin cache unavailable".into())
         }
     }
 
-    pub fn invalidate_hosted(&self) {
+    pub fn complete_local_transition(&self) {
         if let Ok(mut state) = self.state.lock() {
-            state.hosted = None;
-            state.hosted_attempted = false;
+            if let Some(transition) = state.transition.as_mut() {
+                transition.status = "ready";
+            }
         }
+    }
+
+    pub fn change_candidate_pending(&self) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.candidate_signature.is_some())
+            .unwrap_or(false)
     }
 
     pub fn view(&self, allow_hosted: bool) -> NetworkOriginView {
         self.state
             .lock()
-            .map(|state| NetworkOriginView {
-                hosted: allow_hosted.then(|| state.hosted.clone()).flatten(),
-                hosted_attempted: allow_hosted && state.hosted_attempted,
-                assessment: state.assessment,
-                evidence: state.evidence.clone(),
+            .map(|state| {
+                let transition = state.transition.clone().map(|mut transition| {
+                    if !allow_hosted {
+                        transition.previous = None;
+                        transition.current = None;
+                    }
+                    transition
+                });
+                NetworkOriginView {
+                    hosted: allow_hosted.then(|| state.hosted.clone()).flatten(),
+                    hosted_attempted: allow_hosted && state.hosted_attempted,
+                    assessment: state.assessment,
+                    evidence: state.evidence.clone(),
+                    transition,
+                }
             })
             .unwrap_or(NetworkOriginView {
                 hosted: None,
                 hosted_attempted: false,
                 assessment: "unknown",
                 evidence: Vec::new(),
+                transition: None,
             })
     }
 }
@@ -441,5 +528,66 @@ mod tests {
                 .map(|prefix| format!("{prefix}/egress")),
             Some("https://example.test/api/v1/egress".into())
         );
+    }
+
+    fn local(label: &str) -> LocalRouting {
+        LocalRouting {
+            assessment: "no_evidence",
+            evidence: vec![OriginEvidence {
+                kind: "default_interface",
+                strength: "supporting",
+                label: label.into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn network_change_requires_two_matching_samples() {
+        let origin = NetworkOrigin::new();
+        assert!(!origin.apply_local(local("en0")));
+        assert!(!origin.apply_local(local("utun4")));
+        assert!(origin.view(true).transition.is_none());
+        assert!(origin.apply_local(local("utun4")));
+        let transition = origin.view(true).transition.unwrap();
+        assert_eq!(transition.id, 1);
+        assert_eq!(transition.status, "detecting");
+    }
+
+    #[test]
+    fn transient_signature_change_is_cancelled() {
+        let origin = NetworkOrigin::new();
+        assert!(!origin.apply_local(local("en0")));
+        assert!(!origin.apply_local(local("utun4")));
+        assert!(!origin.apply_local(local("en0")));
+        assert!(!origin.apply_local(local("utun4")));
+        assert!(origin.view(true).transition.is_none());
+    }
+
+    #[test]
+    fn local_only_view_hides_hosted_transition_locations() {
+        let origin = NetworkOrigin::new();
+        {
+            let mut state = origin.state.lock().unwrap();
+            state.transition = Some(NetworkTransitionView {
+                id: 1,
+                status: "ready",
+                detected_at: Instant::now(),
+                previous: Some(ExitObservation {
+                    ip: "1.1.1.1".into(),
+                    city: Some("Sydney".into()),
+                    country: Some("AU".into()),
+                    lat: None,
+                    lon: None,
+                    asn: None,
+                    organization: None,
+                    confidence: None,
+                    observed_at: Instant::now(),
+                }),
+                current: None,
+            });
+        }
+        let transition = origin.view(false).transition.unwrap();
+        assert!(transition.previous.is_none());
+        assert!(transition.current.is_none());
     }
 }

@@ -1,4 +1,11 @@
-import { getVersion, invoke, listen } from "./api";
+import {
+  forceTrace,
+  getVersion,
+  invoke,
+  listen,
+  listenToStreamStatus,
+  type StreamStatus,
+} from "./api";
 import {
   clearGlobe,
   colorForKey,
@@ -6,16 +13,20 @@ import {
   recenterOnData,
   setDensity,
   setFocusedApps,
+  setHighlightedHop,
   setHopClickHandler,
   setLabelsVisible,
   setOriginClickHandler,
+  setSegmentClickHandler,
   setSelectedPath,
   updateAllPaths,
   type GlobePath,
+  type GlobeSegmentSelection,
   type HopSelection,
   type NetworkOrigin,
 } from "./globe";
 import { mountOnboarding } from "./onboarding";
+import { shouldPresentTransition, transitionCopy } from "./network-transition";
 import { RouteInspector } from "./route-inspector";
 
 type HopDto = {
@@ -36,6 +47,7 @@ type HopDto = {
 
 type TraceDto = {
   status: string;
+  freshness?: "fresh" | "refreshing" | "stale";
   label: string;
   hops: HopDto[];
   error: string | null;
@@ -76,6 +88,7 @@ type ProcessDto = {
 type AppDto = {
   id: string;
   name: string;
+  iconUrl?: string | null;
   path?: string | null;
   pids: number[];
   processes?: ProcessDto[];
@@ -135,6 +148,7 @@ type SnapshotDto = {
     accessLimited?: number;
     ratio: number;
   };
+  capabilities?: { trafficRates: boolean };
   unattributed?: TrafficGroupDto | null;
   monitoring?: { mode: string; status: string; message: string };
   udpMonitoring?: {
@@ -153,6 +167,7 @@ type SnapshotDto = {
     message: string;
     udpRemote?: boolean;
     accessLimited?: number;
+    truncatedSockets?: number;
     pollPhase?: "active" | "warm" | "idle";
     effectivePollIntervalMs?: number;
     observedOpens?: number;
@@ -183,6 +198,7 @@ type AppGroup = {
   id: string;
   name: string;
   color: string;
+  iconUrl: string | null;
   paths: GlobePath[];
   totalDests: number;
   traced: number;
@@ -205,6 +221,15 @@ let lastPaintAt = 0;
 const MIN_PAINT_MS = 1200;
 let lastSidebarSig = "";
 let lastHeaderSig = "";
+let streamStatus: StreamStatus = "connecting";
+let reconnectTimer: number | null = null;
+let streamHasOpened = false;
+let lastMonitorError: string | null = null;
+let firstRouteRevealed = false;
+let revealTimer: number | null = null;
+let transitionTimer: number | null = null;
+let shownTransitionId = 0;
+let shownTransitionStatus = "";
 
 const UNATTRIBUTED_NAME = "Unattributed traffic";
 const UNATTRIBUTED_ID = "__unattributed__";
@@ -213,6 +238,7 @@ const UNATTRIBUTED_COLOR = "#8a8680";
 const el = {
   globe: document.getElementById("globe")!,
   globeStatus: document.getElementById("globe-status")!,
+  sessionSummary: document.getElementById("session-summary")!,
   networkOrigin: document.getElementById("network-origin") as HTMLButtonElement,
   networkOriginPlace: document.getElementById("network-origin-place")!,
   networkOriginAssessment: document.getElementById("network-origin-assessment")!,
@@ -229,6 +255,14 @@ const el = {
   statTraces: document.getElementById("stat-traces")!,
   statGeo: document.getElementById("stat-geo")!,
   status: document.getElementById("status-msg")!,
+  healthDot: document.getElementById("health-dot")!,
+  healthOverall: document.getElementById("health-overall")!,
+  healthCollector: document.getElementById("health-collector")!,
+  healthAttribution: document.getElementById("health-attribution")!,
+  healthRoutes: document.getElementById("health-routes")!,
+  healthGeo: document.getElementById("health-geo")!,
+  healthStream: document.getElementById("health-stream")!,
+  healthDetail: document.getElementById("health-detail")!,
   filter: document.getElementById("filter") as HTMLInputElement,
   togExternal: document.getElementById("tog-external") as HTMLInputElement,
   togUdp: document.getElementById("tog-udp") as HTMLInputElement,
@@ -238,6 +272,8 @@ const el = {
   togLocalGeo: document.getElementById("tog-local-geo") as HTMLInputElement,
   togHistory: document.getElementById("tog-history") as HTMLInputElement,
   togEnhanced: document.getElementById("tog-enhanced") as HTMLInputElement,
+  trafficSetting: document.getElementById("traffic-setting")!,
+  trafficStatus: document.getElementById("traffic-status")!,
   togDomains: document.getElementById("tog-domains") as HTMLInputElement,
   domainsStatus: document.getElementById("domains-status")!,
   selDensity: document.getElementById("sel-density") as HTMLSelectElement,
@@ -253,6 +289,12 @@ const el = {
   btnAbout: document.getElementById("btn-about") as HTMLButtonElement,
   btnAboutClose: document.getElementById("btn-about-close") as HTMLButtonElement,
   inspector: document.getElementById("route-inspector")!,
+  firstRouteReveal: document.getElementById("first-route-reveal")!,
+  firstRouteTitle: document.getElementById("first-route-title")!,
+  firstRouteDetail: document.getElementById("first-route-detail")!,
+  networkTransition: document.getElementById("network-transition") as HTMLButtonElement,
+  transitionTitle: document.getElementById("transition-title")!,
+  transitionDetail: document.getElementById("transition-detail")!,
 };
 
 const routeInspector = new RouteInspector(el.inspector, {
@@ -260,9 +302,19 @@ const routeInspector = new RouteInspector(el.inspector, {
     setSelectedPath(null);
     paint(true);
   },
-  onSelectRoute: (routeId) => {
-    setSelectedPath(routeId);
+  onSelectRoute: (routeId, instant) => {
+    setSelectedPath(routeId, { frame: true, preview: true, instant });
     paint(true);
+  },
+  onHighlightHop: (hop) => setHighlightedHop(hop),
+  onTraceRoute: async (path) => {
+    try {
+      await forceTrace(path.ip);
+      showToast(`Traceroute queued for ${path.host}`);
+    } catch (error) {
+      showToast(`Could not start traceroute: ${String(error)}`);
+      throw error;
+    }
   },
 });
 
@@ -301,6 +353,7 @@ function routeId(ownerId: string, dest: DestDto): string {
 function pathForDestination(
   ownerId: string,
   ownerName: string,
+  appIconUrl: string | null,
   color: string,
   dest: DestDto,
 ): GlobePath {
@@ -308,7 +361,9 @@ function pathForDestination(
     id: routeId(ownerId, dest),
     appId: ownerId,
     app: ownerName,
+    appIconUrl,
     host: destName(dest),
+    destinationOrg: dest.org,
     ip: dest.ip,
     port: dest.port,
     protocol: dest.protocol,
@@ -333,6 +388,7 @@ function pathForDestination(
       org: h.org,
     })),
     status: dest.trace.status,
+    freshness: dest.trace.freshness ?? "fresh",
     rttMs: finalRtt(dest.trace.hops),
     reachedTarget: !!dest.trace.reachedTarget,
     targetRttMs: dest.trace.targetRttMs ?? null,
@@ -350,6 +406,7 @@ function collectPaths(applyFilter = true): GlobePath[] {
         pathForDestination(
           app.id,
           app.name,
+          app.iconUrl ?? null,
           colorForKey(app.id),
           dest,
         ),
@@ -362,6 +419,7 @@ function collectPaths(applyFilter = true): GlobePath[] {
       pathForDestination(
         UNATTRIBUTED_ID,
         UNATTRIBUTED_NAME,
+        null,
         UNATTRIBUTED_COLOR,
         dest,
       ),
@@ -384,6 +442,7 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
       id: app.id,
       name: app.name,
       color,
+      iconUrl: app.iconUrl ?? null,
       paths: [],
       totalDests: 0,
       traced: 0,
@@ -408,7 +467,9 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
           id,
           appId: app.id,
           app: app.name,
+          appIconUrl: app.iconUrl ?? null,
           host: destName(dest),
+          destinationOrg: dest.org,
           ip: dest.ip,
           port: dest.port,
           protocol: dest.protocol,
@@ -419,6 +480,7 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
           color,
           hops: [],
           status: dest.trace.status,
+          freshness: dest.trace.freshness ?? "fresh",
           rttMs: finalRtt(dest.trace.hops),
           reachedTarget: !!dest.trace.reachedTarget,
           targetRttMs: dest.trace.targetRttMs ?? null,
@@ -447,7 +509,7 @@ function sidebarSignature(groups: AppGroup[]): string {
         )
         .join(";");
       const processes = g.processes.map((process) => process.id).sort().join(",");
-      return `${g.id}|${g.name}|${g.traced}/${g.totalDests}|${g.activity.toFixed(1)}|${g.currentConnections}|${processes}|${dests}`;
+      return `${g.id}|${g.name}|${g.iconUrl ?? ""}|${g.traced}/${g.totalDests}|${g.activity.toFixed(1)}|${g.currentConnections}|${processes}|${dests}`;
     })
     .join("||");
   const unattributed = snapshot?.unattributed;
@@ -480,6 +542,189 @@ async function pushSettings() {
   }
 }
 
+type HealthState = "ready" | "degraded" | "unavailable" | "waiting";
+
+function setHealthValue(element: HTMLElement, text: string, state: HealthState = "ready") {
+  element.textContent = text;
+  element.classList.toggle("degraded", state === "degraded");
+  element.classList.toggle("unavailable", state === "unavailable");
+}
+
+function renderCapabilities(): void {
+  const trafficRates = snapshot?.capabilities?.trafficRates ?? true;
+  el.togEnhanced.disabled = !trafficRates;
+  el.trafficSetting.classList.toggle("is-unavailable", !trafficRates);
+  if (!trafficRates) {
+    el.togEnhanced.checked = false;
+    el.trafficStatus.textContent = "Unavailable on macOS";
+  } else {
+    el.trafficStatus.textContent = "Native per-app upload and download";
+  }
+}
+
+function renderHealth(mappedPaths: GlobePath[]): void {
+  if (!snapshot) {
+    el.status.textContent = "Starting monitor…";
+    el.healthDot.className = "health-dot waiting";
+    setHealthValue(el.healthOverall, "Starting", "waiting");
+    return;
+  }
+
+  const collection = snapshot.collection;
+  const trace = snapshot.traceStats;
+  const details: string[] = [];
+  let overall: HealthState = "ready";
+
+  const collectorState: HealthState = collection?.status === "unavailable"
+    ? "unavailable"
+    : collection?.status === "degraded"
+      ? "degraded"
+      : "ready";
+  setHealthValue(
+    el.healthCollector,
+    collectorState === "ready" ? "Ready" : collectorState === "degraded" ? "Limited" : "Unavailable",
+    collectorState,
+  );
+  if (collectorState !== "ready") overall = collectorState;
+  if (collection?.status === "degraded" && collection.message) details.push(collection.message);
+  if (collection?.accessLimited) details.push(`${collection.accessLimited} protected processes could not be inspected`);
+  if (collection?.truncatedSockets) details.push(`${collection.truncatedSockets} socket records were truncated`);
+
+  if (snapshot.appCount === 0) {
+    setHealthValue(el.healthAttribution, "Waiting", "waiting");
+  } else {
+    const ratio = Math.round((snapshot.attribution?.ratio ?? 1) * 100);
+    setHealthValue(el.healthAttribution, `${ratio}% identified`, ratio < 70 ? "degraded" : "ready");
+  }
+
+  if (!snapshot.tracesEnabled) {
+    setHealthValue(el.healthRoutes, "Off", "waiting");
+  } else if (trace.running + trace.queued > 0) {
+    setHealthValue(el.healthRoutes, `${trace.running + trace.queued} mapping`, "waiting");
+  } else if (mappedPaths.length > 0) {
+    setHealthValue(el.healthRoutes, `${mappedPaths.length} mapped`);
+  } else if (trace.failed > 0) {
+    setHealthValue(el.healthRoutes, "Unavailable", "unavailable");
+    overall = "unavailable";
+    details.push("Traceroute did not return a usable route; connection monitoring is still live");
+  } else {
+    setHealthValue(el.healthRoutes, "Waiting", "waiting");
+  }
+
+  const locatedHops = mappedPaths.reduce(
+    (count, path) => count + path.hops.filter((hop) => hop.lat != null && hop.lon != null).length,
+    0,
+  );
+  if (locatedHops > 0) {
+    setHealthValue(el.healthGeo, snapshot.geoBackend ?? "Ready");
+  } else if (trace.done > 0) {
+    setHealthValue(el.healthGeo, "Limited", "degraded");
+    if (overall === "ready") overall = "degraded";
+  } else {
+    setHealthValue(el.healthGeo, "Waiting", "waiting");
+  }
+
+  const browserState: HealthState = streamStatus === "open" ? "ready" : "degraded";
+  setHealthValue(
+    el.healthStream,
+    streamStatus === "open" ? "Connected" : streamStatus === "reconnecting" ? "Reconnecting" : "Connecting",
+    browserState,
+  );
+  if (streamStatus === "reconnecting") {
+    if (overall === "ready") overall = "degraded";
+    details.push("Dashboard connection interrupted; showing the last received snapshot");
+  }
+  if (lastMonitorError) {
+    if (overall === "ready") overall = "degraded";
+    details.push(lastMonitorError);
+  }
+
+  el.status.textContent = streamStatus === "reconnecting"
+    ? "Reconnecting · showing last snapshot"
+    : `Near-live · ${snapshot.appCount} ${snapshot.appCount === 1 ? "app" : "apps"} · ${mappedPaths.length} ${mappedPaths.length === 1 ? "route" : "routes"}`;
+  el.healthDot.className = `health-dot ${overall}`;
+  setHealthValue(
+    el.healthOverall,
+    overall === "ready" ? "Ready" : overall === "degraded" ? "Limited" : "Unavailable",
+    overall,
+  );
+  el.healthDetail.hidden = details.length === 0;
+  el.healthDetail.textContent = [...new Set(details)].join(" · ");
+}
+
+function renderSessionExperience(mappedPaths: GlobePath[]): void {
+  if (!snapshot || mappedPaths.length === 0) {
+    el.sessionSummary.hidden = true;
+    return;
+  }
+
+  const organizations = new Set<string>();
+  for (const app of snapshot.apps) {
+    for (const destination of app.destinations) {
+      if (destination.org && destination.org.toLowerCase() !== "unknown") {
+        organizations.add(destination.org);
+      }
+    }
+  }
+  const countries = new Set(
+    mappedPaths.flatMap((path) => path.hops.map((hop) => hop.country).filter(Boolean) as string[]),
+  );
+  const parts = [`${snapshot.appCount} ${snapshot.appCount === 1 ? "app" : "apps"}`];
+  if (organizations.size > 0) parts.push(`${organizations.size} destination ${organizations.size === 1 ? "network" : "networks"}`);
+  if (countries.size > 0) parts.push(`${countries.size} mapped ${countries.size === 1 ? "country" : "countries"}`);
+  el.sessionSummary.textContent = parts.join(" · ");
+  el.sessionSummary.hidden = false;
+
+  if (firstRouteRevealed) return;
+  const candidate = mappedPaths.find(
+    (path) => path.appId !== UNATTRIBUTED_ID && path.hops.filter((hop) => hop.lat != null && hop.lon != null).length >= 2,
+  ) ?? mappedPaths.find((path) => path.hops.filter((hop) => hop.lat != null && hop.lon != null).length >= 2);
+  if (!candidate) return;
+
+  const located = candidate.hops.filter((hop) => hop.lat != null && hop.lon != null);
+  const last = located.at(-1)!;
+  const place = last.city
+    ? `${last.city}${last.country ? `, ${last.country}` : ""}`
+    : last.country || "Across the public internet";
+  const answeredHops = candidate.hops.filter((hop) => hop.addr != null).length;
+  firstRouteRevealed = true;
+  el.onboardingHost.replaceChildren();
+  el.networkTransition.hidden = true;
+  shownTransitionStatus = "";
+  if (transitionTimer != null) window.clearTimeout(transitionTimer);
+  el.firstRouteTitle.textContent = `${candidate.app} → ${candidate.destinationOrg || candidate.host}`;
+  el.firstRouteDetail.textContent = `${place} · ${answeredHops} answering ${answeredHops === 1 ? "hop" : "hops"}`;
+  el.firstRouteReveal.hidden = false;
+  if (revealTimer != null) window.clearTimeout(revealTimer);
+  revealTimer = window.setTimeout(() => {
+    el.firstRouteReveal.hidden = true;
+    renderNetworkTransition(snapshot?.networkOrigin ?? null);
+  }, 4500);
+}
+
+function renderNetworkTransition(origin: NetworkOrigin | null): void {
+  const transition = origin?.transition;
+  if (!shouldPresentTransition(transition, shownTransitionId) || !transition || !el.firstRouteReveal.hidden) return;
+
+  const isNew = transition.id > shownTransitionId;
+  const statusChanged = transition.status !== shownTransitionStatus;
+  if (!isNew && !statusChanged) return;
+  shownTransitionId = transition.id;
+  shownTransitionStatus = transition.status;
+
+  const copy = transitionCopy(transition);
+  el.transitionTitle.textContent = copy.title;
+  el.transitionDetail.textContent = copy.detail;
+
+  el.networkTransition.hidden = false;
+  if (transitionTimer != null) window.clearTimeout(transitionTimer);
+  if (transition.status !== "detecting") {
+    transitionTimer = window.setTimeout(() => {
+      el.networkTransition.hidden = true;
+    }, 8000);
+  }
+}
+
 function paint(forceSidebar = false) {
   paintScheduled = false;
   lastPaintAt = performance.now();
@@ -495,6 +740,7 @@ function paint(forceSidebar = false) {
   }
 
   const allPaths = collectPaths(false);
+  const allMappedPaths = allPaths.filter((p) => p.status === "done" && p.hops.length > 0);
   const paths = collectPaths(true);
   const mapPaths = paths.filter((p) => p.status === "done" && p.hops.length > 0);
   const groups = collectAppGroups(paths);
@@ -555,7 +801,7 @@ function paint(forceSidebar = false) {
         el.traceProgressTitle.textContent = t.running > 0
           ? "Traceroute in progress"
           : "Traceroutes queued";
-        el.traceProgressDetail.textContent = `Current map is incomplete — ${tracesRemaining} ${tracesRemaining === 1 ? "route is" : "routes are"} still being measured`;
+        el.traceProgressDetail.textContent = `Results arrive gradually — ${tracesRemaining} ${tracesRemaining === 1 ? "route is" : "routes are"} still being measured`;
         el.traceProgressCount.textContent = t.running > 0
           ? `${t.running} active · ${t.queued} queued`
           : `${t.queued} waiting`;
@@ -568,38 +814,6 @@ function paint(forceSidebar = false) {
           ? "Local MaxMind city DB loaded"
           : "Online geo only";
       }
-      const attribution = snapshot.attribution;
-      const quality = attribution
-        ? ` · ${Math.round(attribution.ratio * 100)}% attributed`
-        : "";
-      const recovered = attribution?.recovered
-        ? ` · ${attribution.recovered} recovered`
-        : "";
-      const telemetry = snapshot.monitoring;
-      const traffic = telemetry?.mode === "native" ? " · traffic rates on" : "";
-      const trafficError = telemetry?.status === "unavailable"
-        ? ` · traffic rates unavailable: ${telemetry.message}`
-        : "";
-      const collection = snapshot.collection;
-      const collectionMode = collection?.mode === "event-assisted"
-        ? " · TCP close events on"
-        : " · TCP polling";
-      const captureCadence = collection?.pollPhase
-        ? ` · ${collection.pollPhase} ${collection.effectivePollIntervalMs ?? 0}ms`
-        : "";
-      const collectionWarning = collection?.status === "degraded"
-        ? ` · collector degraded: ${collection.message}`
-        : "";
-      const accessLimited = collection?.accessLimited
-        ? ` · ${collection.accessLimited} protected processes skipped`
-        : "";
-      const dropped = collection?.droppedEvents
-        ? ` · ${collection.droppedEvents} events dropped`
-        : "";
-      el.status.textContent = `Live · ${snapshot.liveConnections} conns · ${mapPaths.length} paths${quality}${recovered}${collectionMode}${captureCadence}${collectionWarning}${accessLimited}${dropped}${traffic}${trafficError}`;
-      el.status.title = collection
-        ? `Session capture: ${collection.observedOpens ?? 0} opens, ${collection.observedCloses ?? 0} closes, ${collection.recoveredOwners ?? 0} owners recovered, ${(collection.unattributedOwnerGone ?? 0) + (collection.unattributedAmbiguous ?? 0) + (collection.unattributedAccessLimited ?? 0)} unattributed`
-        : "";
       el.btnClearFocus.hidden = focused.size === 0;
       const focusedNames = snapshot.apps
         .filter((app) => focused.has(app.id))
@@ -623,10 +837,23 @@ function paint(forceSidebar = false) {
   }
   el.statPaths.textContent = `${pathCount}`;
   el.statHops.textContent = `${hopCount}`;
-  el.globeStatus.textContent =
-    pathCount > 0
-      ? `${pathCount} paths · ${destCount} destinations · ${hopCount} hops`
-      : "Waiting for mapped traceroutes…";
+  el.globeStatus.textContent = pathCount > 0
+    ? `${pathCount} paths · ${destCount} destinations · ${hopCount} hops`
+    : allMappedPaths.length > 0
+      ? "No mapped routes match this view"
+    : !snapshot
+      ? "Starting monitor…"
+      : snapshot.appCount === 0
+        ? "Watching for traffic · try websites hosted in a few different countries"
+        : snapshot.destCount === 0
+          ? "Finding destinations · new activity appears after a short delay"
+          : snapshot.tracesEnabled
+            ? "Mapping routes · traceroutes take a little time"
+            : "Connections detected · route mapping is off";
+  renderCapabilities();
+  renderHealth(allMappedPaths);
+  renderSessionExperience(allMappedPaths);
+  renderNetworkTransition(networkOrigin);
 
   const sig = sidebarSignature(groups);
   if (forceSidebar || sig !== lastSidebarSig) {
@@ -680,17 +907,50 @@ function schedulePaint(snap?: SnapshotDto, immediate = false) {
   window.setTimeout(() => requestAnimationFrame(() => paint(false)), wait);
 }
 
+function handleStreamStatus(next: StreamStatus): void {
+  if (next === "open") {
+    const reconnected = streamHasOpened;
+    streamHasOpened = true;
+    if (reconnectTimer != null) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    streamStatus = "open";
+    if (reconnected) {
+      void invoke<SnapshotDto>("get_snapshot")
+        .then((fresh) => schedulePaint(fresh, true))
+        .catch(() => undefined);
+    }
+    paint(false);
+    return;
+  }
+
+  if (next === "reconnecting") {
+    if (reconnectTimer != null) return;
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      streamStatus = "reconnecting";
+      paint(false);
+    }, 750);
+    return;
+  }
+
+  streamStatus = "connecting";
+  paint(false);
+}
+
 function statusBadge(status: string): string {
   if (status === "done") return `<span class="badge ok">observed</span>`;
   if (status === "running") return `<span class="badge run">tracing…</span>`;
   if (status === "queued") return `<span class="badge queue">queued</span>`;
+  if (status === "deferred") return `<span class="badge">not auto-traced</span>`;
   if (status === "failed") return `<span class="badge fail">fail</span>`;
   return `<span class="badge">${escapeHtml(status)}</span>`;
 }
 
 function renderSidebar(groups: AppGroup[]) {
   if (groups.length === 0 && !snapshot?.unattributed) {
-    el.appList.innerHTML = `<div class="empty">No applications with internet connections yet.</div>`;
+    el.appList.innerHTML = `<div class="empty">No internet activity detected yet.<br>Open websites hosted in a few different countries, then give the map a moment.</div>`;
     return;
   }
 
@@ -751,7 +1011,11 @@ function renderSidebar(groups: AppGroup[]) {
                 ? ` · ${owners.map((process) => `${process.name} (${process.pid})`).join(", ")}`
                 : "";
               const marker = p.reachedTarget ? "★" : "◌";
-              const traceState = p.reachedTarget
+              const traceState = p.freshness === "refreshing"
+                ? "refreshing"
+                : p.freshness === "stale"
+                  ? "last known"
+                  : p.reachedTarget
                 ? `${mapped} mapped`
                 : p.status === "done"
                   ? "partial"
@@ -768,9 +1032,12 @@ function renderSidebar(groups: AppGroup[]) {
             .join("")
         : "";
 
+      const icon = g.iconUrl
+        ? `<img class="app-icon-image" src="${escapeHtml(g.iconUrl)}" alt="" decoding="async">`
+        : "";
       return `<div class="app-card${isFocused ? " focused" : ""}${dim ? " dim" : ""}" data-app="${escapeHtml(g.id)}">
-        <button type="button" class="app-row" data-app-toggle="${escapeHtml(g.id)}" aria-expanded="${isOpen}">
-          <span class="swatch" style="background:${g.color};box-shadow:0 0 10px ${g.color}"></span>
+        <button type="button" class="app-row app-row-native" data-app-toggle="${escapeHtml(g.id)}" aria-expanded="${isOpen}">
+          <span class="app-icon-shell" style="--app-color:${g.color}"><span class="app-icon-fallback"></span>${icon}<i></i></span>
           <span class="app-main">
             <span class="app-name">${escapeHtml(g.name)}</span>
             <span class="app-meta">${g.traced}/${g.totalDests} dests · ${g.currentConnections} current${act}</span>
@@ -845,6 +1112,19 @@ function showToast(msg: string) {
 }
 
 function wireUi() {
+  document.addEventListener("error", (event) => {
+    const image = event.target as HTMLImageElement | null;
+    if (!image?.classList.contains("app-icon-image")) return;
+    image.hidden = true;
+    image.parentElement?.classList.add("icon-missing");
+  }, true);
+  el.networkTransition.addEventListener("click", () => {
+    if (!snapshot?.networkOrigin) return;
+    el.networkTransition.hidden = true;
+    setSelectedPath(null);
+    routeInspector.showOrigin(snapshot.networkOrigin, el.networkTransition);
+    paint(true);
+  });
   el.networkOrigin.addEventListener("click", () => {
     if (snapshot?.networkOrigin) {
       setSelectedPath(null);
@@ -857,7 +1137,11 @@ function wireUi() {
       "[data-route-id]",
     );
     if (routeButton?.dataset.routeId) {
-      setSelectedPath(routeButton.dataset.routeId);
+      setSelectedPath(routeButton.dataset.routeId, {
+        frame: true,
+        preview: true,
+        instant: (ev as MouseEvent).detail === 0,
+      });
       routeInspector.showRoute(routeButton.dataset.routeId, routeButton);
       paint(true);
       return;
@@ -923,19 +1207,19 @@ function wireUi() {
     expanded.clear();
     lastSidebarSig = "";
     lastHeaderSig = "";
-    el.status.textContent = "Reset history and traceroute cache";
+    showToast("Reset history and traceroute cache");
     schedulePaint(undefined, true);
   });
 
   el.btnTraceAll.addEventListener("click", async () => {
     await invoke("force_trace_all");
-    el.status.textContent = "Re-tracing all destinations…";
+    showToast("Re-tracing all destinations…");
   });
 
   el.btnRecenter.addEventListener("click", () => {
     recenterOnData();
     paint(true);
-    el.status.textContent = "Camera recentered on active paths";
+    showToast("Camera recentered on active paths");
   });
 
   el.btnClearFocus.addEventListener("click", () => {
@@ -1000,15 +1284,18 @@ async function boot() {
     setHopClickHandler((selection: HopSelection) => {
       const routeIds = [...new Set(selection.routes.map((route) => route.pathId))];
       if (routeIds.length === 1) {
-        setSelectedPath(routeIds[0]);
+        setSelectedPath(routeIds[0], { frame: true, preview: true });
         routeInspector.showRoute(routeIds[0]);
       } else {
         setSelectedPath(null);
         routeInspector.showNode(selection);
       }
       paint(true);
-      const place = selection.city || selection.hostname || selection.addr || "mapped node";
-      el.status.textContent = `Inspecting ${place} · ${routeIds.length} route${routeIds.length === 1 ? "" : "s"}`;
+    });
+    setSegmentClickHandler((segment: GlobeSegmentSelection) => {
+      setSelectedPath(segment.pathId, { frame: true, preview: true });
+      routeInspector.showRoute(segment.pathId, null, segment);
+      paint(true);
     });
     setOriginClickHandler((origin: NetworkOrigin) => {
       setSelectedPath(null);
@@ -1038,20 +1325,24 @@ async function boot() {
   }
 
   mountOnboarding(el.onboardingHost);
+  listenToStreamStatus(handleStreamStatus);
 
   try {
     snapshot = await invoke<SnapshotDto>("get_snapshot");
     paint(true);
   } catch (e) {
-    el.status.textContent = `Waiting for backend… (${String(e)})`;
+    lastMonitorError = `Waiting for backend: ${String(e)}`;
+    el.status.textContent = "Waiting for backend…";
   }
 
   try {
     await listen<SnapshotDto>("monitor-update", (event) => {
+      if (event.payload.collection?.status === "ready") lastMonitorError = null;
       schedulePaint(event.payload, false);
     });
     await listen<string>("monitor-error", (event) => {
-      el.status.textContent = `Monitor error: ${event.payload}`;
+      lastMonitorError = event.payload;
+      paint(false);
     });
     await listen<{ app: string; host: string; ip: string; summary: string }>(
       "path-changed",

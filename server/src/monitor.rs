@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
+use crate::app_icons::AppIconStore;
 use crate::collect::{
     DestinationNameCache, DestinationNamingStatus, OsDnsCollector, SniObservation, SocketCollector,
 };
@@ -29,6 +30,7 @@ pub struct Monitor {
     pub settings: Mutex<SettingsDto>,
     pub destination_names: DestinationNameCache,
     pub network_origin: NetworkOrigin,
+    pub app_icons: AppIconStore,
     dns_collector: Mutex<OsDnsCollector>,
     /// Previous hop fingerprint per "app|ip"
     path_fps: Mutex<HashMap<String, u64>>,
@@ -54,7 +56,10 @@ impl Default for CaptureRuntime {
 
 impl Monitor {
     pub fn new() -> Self {
-        let settings = settings_store::load().unwrap_or_default();
+        let mut settings = settings_store::load().unwrap_or_default();
+        if !cfg!(target_os = "linux") {
+            settings.enhanced_monitoring = false;
+        }
         let retain = Duration::from_secs(45);
         let trace_cfg = TraceConfig {
             enabled: settings.traces_enabled,
@@ -76,6 +81,7 @@ impl Monitor {
             settings: Mutex::new(settings),
             destination_names: DestinationNameCache::new(),
             network_origin: NetworkOrigin::new(),
+            app_icons: AppIconStore::new(),
             dns_collector: Mutex::new(OsDnsCollector::default()),
             path_fps: Mutex::new(HashMap::new()),
             path_changed: Mutex::new(HashSet::new()),
@@ -110,7 +116,7 @@ impl Monitor {
         {
             let mut traces = self.traces.lock();
             if traces.enabled() {
-                let ips = self.state.lock().unique_remote_ips();
+                let ips = self.state.lock().auto_trace_ips();
                 for ip in ips {
                     traces.request(ip);
                 }
@@ -154,6 +160,7 @@ impl Monitor {
                 destination_naming: &destination_naming,
                 udp_status: &udp_status,
                 network_origin: &network_origin,
+                app_icons: &self.app_icons,
             },
         )
     }
@@ -201,6 +208,9 @@ impl Monitor {
     pub fn apply_settings(&self, mut settings: SettingsDto) {
         settings.settings_version = 3;
         settings.privacy_accepted = true;
+        if !cfg!(target_os = "linux") {
+            settings.enhanced_monitoring = false;
+        }
         let (traces_changed, domains_disabled) = {
             let mut current = self.settings.lock();
             let changed = current.traces_enabled != settings.traces_enabled;
@@ -234,6 +244,17 @@ impl Monitor {
         self.state.lock().reset();
         self.traces.lock().clear_cache();
         self.path_geo.clear();
+        self.path_fps.lock().clear();
+        self.path_changed.lock().clear();
+        self.app_icons.clear();
+    }
+
+    pub fn handle_network_change(&self) {
+        let ips = self.state.lock().unique_remote_ips();
+        self.traces.lock().refresh_many(ips);
+        // A network transition is expected to change paths. Start a new
+        // comparison baseline instead of reporting every refreshed route as
+        // an organic mid-session path change.
         self.path_fps.lock().clear();
         self.path_changed.lock().clear();
     }

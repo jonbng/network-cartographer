@@ -113,16 +113,15 @@ The app searches the project `data/` directory and common system GeoIP locations
 
 ## Limitations
 
-- HTTPS and UDP payloads remain encrypted
-- Automatic OS DNS correlation is currently Windows-only; DNS-over-HTTPS and encrypted ClientHello can hide domain evidence
-- Shared CDN addresses use the most recently observed DNS answer and may occasionally receive the wrong label
-- UDP coverage is limited to connected sockets; destinations used only through unconnected `sendto()` calls are not visible without elevated packet capture
-- System, protected, or higher-integrity processes may not expose UDP peers to the current user
-- Isolated short-lived connections may still disappear during idle polling; capture automatically accelerates after activity is observed
-- Linux close events require kernel permission and can recover missed destinations, but not always their process owner
-- Unprovable socket owners appear as **Unattributed traffic**
-- Per-application byte rates depend on OS support
-- Geolocation is approximate and the hosted service may be unavailable
+- Network Cartographer reads socket metadata, not packet contents, and does not inspect HTTPS or other application payloads
+- Automatic OS DNS correlation is currently Windows-only. DNS-over-HTTPS and encrypted ClientHello can hide domain evidence, while shared CDN addresses may occasionally inherit the wrong recently observed name
+- UDP coverage is limited to connected sockets. Destinations used only through unconnected `sendto()` calls require elevated packet capture and are not visible
+- Collection runs as the current user, so protected or higher-integrity processes may not expose every socket or enough metadata for attribution. Unprovable owners appear as **Unattributed traffic**
+- TCP discovery is polling-based on macOS and Windows. Linux can supplement polling with kernel TCP close events when permitted, but isolated short-lived connections may still be missed or recovered without their process owner
+- Exceptionally large macOS socket scans are capped for safety; any truncated records and inaccessible processes are reported in the dashboard health panel
+- Automatic traceroutes require repeated, attributed TCP evidence. UDP-only, one-off, and unattributed destinations remain visible but must be traced manually with **Trace all**
+- Per-application upload/download rates are currently available only on Linux
+- Traceroutes depend on platform tools and network replies, and geolocation remains approximate; routes may be partial and the hosted geolocation service may be unavailable
 - Per-application split tunneling can use exits other than the single primary exit marker
 
 ## License

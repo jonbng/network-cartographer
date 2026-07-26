@@ -4,10 +4,13 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         cc::Build::new()
             .file("src/collect/udp/macos.c")
+            .file("src/collect/macos_identity.m")
             .warnings(true)
             .compile("netcart_udp_macos");
         println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=framework=AppKit");
         println!("cargo:rerun-if-changed=src/collect/udp/macos.c");
+        println!("cargo:rerun-if-changed=src/collect/macos_identity.m");
     }
 
     println!("cargo:rerun-if-changed=../ui");

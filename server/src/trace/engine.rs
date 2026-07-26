@@ -49,7 +49,16 @@ pub enum TraceStatus {
     Queued,
     Running,
     Done(TraceResult),
-    Failed { message: String, at: Instant },
+    Refreshing(TraceResult),
+    Stale {
+        result: TraceResult,
+        message: String,
+        at: Instant,
+    },
+    Failed {
+        message: String,
+        at: Instant,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -62,7 +71,14 @@ pub struct TraceStats {
 
 struct JobResult {
     ip: IpAddr,
+    generation: u64,
     result: TraceResult,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TraceJob {
+    ip: IpAddr,
+    generation: u64,
 }
 
 /// Background traceroute queue with cache, shared by IP across apps.
@@ -72,14 +88,15 @@ pub struct TraceEngine {
     queue: VecDeque<IpAddr>,
     pending: HashSet<IpAddr>,
     running: HashSet<IpAddr>,
-    job_tx: Option<Sender<IpAddr>>,
+    generation: u64,
+    job_tx: Option<Sender<TraceJob>>,
     result_rx: Receiver<JobResult>,
 }
 
 impl TraceEngine {
     pub fn new(cfg: TraceConfig) -> Self {
         let (result_tx, result_rx) = mpsc::channel::<JobResult>();
-        let (job_tx, job_rx) = mpsc::channel::<IpAddr>();
+        let (job_tx, job_rx) = mpsc::channel::<TraceJob>();
         let job_rx = Arc::new(Mutex::new(job_rx));
         if cfg.enabled {
             let workers = cfg.max_concurrent.max(1);
@@ -104,6 +121,7 @@ impl TraceEngine {
             queue: VecDeque::new(),
             pending: HashSet::new(),
             running: HashSet::new(),
+            generation: 0,
             job_tx: Some(job_tx),
             result_rx,
         }
@@ -130,7 +148,8 @@ impl TraceEngine {
             match status {
                 TraceStatus::Done(r) if r.finished_at.elapsed() < self.cfg.cache_ttl => return,
                 TraceStatus::Failed { at, .. } if at.elapsed() < Duration::from_secs(300) => return,
-                TraceStatus::Queued | TraceStatus::Running => return,
+                TraceStatus::Stale { at, .. } if at.elapsed() < Duration::from_secs(300) => return,
+                TraceStatus::Queued | TraceStatus::Running | TraceStatus::Refreshing(_) => return,
                 _ => {}
             }
         }
@@ -158,10 +177,15 @@ impl TraceEngine {
         if self.pending.contains(&ip) || self.running.contains(&ip) {
             return;
         }
-        self.cache.remove(&ip);
+        let previous = previous_result(self.cache.remove(&ip));
         self.pending.insert(ip);
         self.queue.push_back(ip);
-        self.cache.insert(ip, TraceStatus::Queued);
+        self.cache.insert(
+            ip,
+            previous
+                .map(TraceStatus::Refreshing)
+                .unwrap_or(TraceStatus::Queued),
+        );
         self.dispatch();
     }
 
@@ -177,12 +201,23 @@ impl TraceEngine {
 
     pub fn poll(&mut self) {
         while let Ok(job) = self.result_rx.try_recv() {
+            if job.generation != self.generation {
+                continue;
+            }
             self.running.remove(&job.ip);
             self.pending.remove(&job.ip);
             let status = if job.result.error.is_some() && job.result.hops.is_empty() {
-                TraceStatus::Failed {
-                    message: job.result.error.clone().unwrap_or_else(|| "failed".into()),
-                    at: Instant::now(),
+                let message = job.result.error.clone().unwrap_or_else(|| "failed".into());
+                match previous_result(self.cache.remove(&job.ip)) {
+                    Some(result) => TraceStatus::Stale {
+                        result,
+                        message,
+                        at: Instant::now(),
+                    },
+                    None => TraceStatus::Failed {
+                        message,
+                        at: Instant::now(),
+                    },
                 }
             } else {
                 TraceStatus::Done(job.result)
@@ -199,6 +234,11 @@ impl TraceEngine {
                 TraceStatus::Queued => s.queued += 1,
                 TraceStatus::Running => s.running += 1,
                 TraceStatus::Done(_) => s.done += 1,
+                TraceStatus::Refreshing(_) => s.done += 1,
+                TraceStatus::Stale { .. } => {
+                    s.done += 1;
+                    s.failed += 1;
+                }
                 TraceStatus::Failed { .. } => s.failed += 1,
                 TraceStatus::Idle => {}
             }
@@ -210,10 +250,45 @@ impl TraceEngine {
     }
 
     pub fn clear_cache(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.cache.clear();
         self.queue.clear();
         self.pending.clear();
         // leave in-flight workers; results will repopulate cache
+    }
+
+    /// Re-probe active destinations after a network transition without making
+    /// the useful, previously completed globe disappear.
+    pub fn refresh_many(&mut self, ips: impl IntoIterator<Item = IpAddr>) {
+        if !self.cfg.enabled {
+            return;
+        }
+        self.poll();
+        self.generation = self.generation.wrapping_add(1);
+        self.queue.clear();
+        self.pending.clear();
+        self.running.clear();
+
+        let mut targets = HashSet::new();
+        for ip in ips {
+            if (self.cfg.skip_private && is_local_or_private(ip)) || !is_valid_target(ip) {
+                continue;
+            }
+            if !targets.insert(ip) {
+                continue;
+            }
+            let previous = previous_result(self.cache.remove(&ip));
+            self.pending.insert(ip);
+            self.queue.push_back(ip);
+            self.cache.insert(
+                ip,
+                previous
+                    .map(TraceStatus::Refreshing)
+                    .unwrap_or(TraceStatus::Queued),
+            );
+        }
+        self.cache.retain(|ip, _| targets.contains(ip));
+        self.dispatch();
     }
 
     fn dispatch(&mut self) {
@@ -226,8 +301,16 @@ impl TraceEngine {
                 break;
             };
             self.running.insert(ip);
-            self.cache.insert(ip, TraceStatus::Running);
-            if tx.send(ip).is_err() {
+            if !matches!(self.cache.get(&ip), Some(TraceStatus::Refreshing(_))) {
+                self.cache.insert(ip, TraceStatus::Running);
+            }
+            if tx
+                .send(TraceJob {
+                    ip,
+                    generation: self.generation,
+                })
+                .is_err()
+            {
                 self.running.remove(&ip);
                 self.cache.insert(
                     ip,
@@ -243,27 +326,42 @@ impl TraceEngine {
 }
 
 fn worker_loop(
-    job_rx: Arc<Mutex<Receiver<IpAddr>>>,
+    job_rx: Arc<Mutex<Receiver<TraceJob>>>,
     result_tx: Sender<JobResult>,
     probe: ProbeConfig,
 ) {
     loop {
-        let ip = {
+        let job = {
             let guard = match job_rx.lock() {
                 Ok(g) => g,
                 Err(_) => break,
             };
             match guard.recv() {
-                Ok(ip) => ip,
+                Ok(job) => job,
                 Err(_) => break,
             }
         };
 
-        let result = execute_trace(ip, &probe);
+        let result = execute_trace(job.ip, &probe);
 
-        if result_tx.send(JobResult { ip, result }).is_err() {
+        if result_tx
+            .send(JobResult {
+                ip: job.ip,
+                generation: job.generation,
+                result,
+            })
+            .is_err()
+        {
             break;
         }
+    }
+}
+
+fn previous_result(status: Option<TraceStatus>) -> Option<TraceResult> {
+    match status? {
+        TraceStatus::Done(result) | TraceStatus::Refreshing(result) => Some(result),
+        TraceStatus::Stale { result, .. } => Some(result),
+        _ => None,
     }
 }
 
@@ -498,6 +596,66 @@ mod tests {
         let cmds = macos_commands(target, "20".into(), target.to_string());
         assert!(!cmds.is_empty());
         assert!(cmds.iter().all(|(program, _)| program == "traceroute6"));
+    }
+
+    fn completed(target: IpAddr) -> TraceResult {
+        TraceResult {
+            target,
+            hops: vec![crate::trace::Hop {
+                ttl: 1,
+                addr: Some(target),
+                rtt_ms: Some(10.0),
+            }],
+            finished_at: Instant::now(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn network_refresh_preserves_completed_route() {
+        let mut engine = TraceEngine::new(TraceConfig {
+            enabled: false,
+            ..TraceConfig::default()
+        });
+        engine.cfg.enabled = true;
+        engine.job_tx = None;
+        let target = target_v4();
+        engine
+            .cache
+            .insert(target, TraceStatus::Done(completed(target)));
+
+        engine.refresh_many([target]);
+
+        assert!(matches!(engine.get(target), TraceStatus::Refreshing(_)));
+        assert_eq!(engine.generation, 1);
+    }
+
+    #[test]
+    fn result_from_previous_network_generation_is_ignored() {
+        let mut engine = TraceEngine::new(TraceConfig {
+            enabled: false,
+            ..TraceConfig::default()
+        });
+        engine.cfg.enabled = true;
+        engine.job_tx = None;
+        let target = target_v4();
+        engine
+            .cache
+            .insert(target, TraceStatus::Done(completed(target)));
+        engine.refresh_many([target]);
+
+        let (sender, receiver) = mpsc::channel();
+        engine.result_rx = receiver;
+        sender
+            .send(JobResult {
+                ip: target,
+                generation: 0,
+                result: completed(target),
+            })
+            .unwrap();
+        engine.poll();
+
+        assert!(matches!(engine.get(target), TraceStatus::Refreshing(_)));
     }
 
     #[cfg(target_os = "windows")]

@@ -50,6 +50,11 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: cargo build --release --locked --manifest-path server/Cargo.toml
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '13.0' || '' }}
+      - name: Verify macOS deployment target
+        if: runner.os == 'macOS'
+        run: xcrun vtool -show-build server/target/release/netcart | grep -Eq 'minos 13\.0'
       - name: Smoke test CLI (Unix)
         if: runner.os != 'Windows'
         run: server/target/release/netcart --help

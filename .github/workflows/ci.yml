@@ -20,6 +20,7 @@ jobs:
           node-version: "24"
           cache: npm
       - run: npm ci
+      - run: npm run test:ui
       - run: npm run build
 
   rust:
@@ -44,9 +45,13 @@ jobs:
       - run: npm run build
       - name: cargo check
         working-directory: server
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '13.0' || '' }}
         run: cargo check --locked
       - name: cargo test
         working-directory: server
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '13.0' || '' }}
         run: cargo test --locked
 
   geo-service:

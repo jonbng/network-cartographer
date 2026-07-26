@@ -36,6 +36,7 @@ pub struct NativeSnapshot {
     pub source: &'static str,
     pub udp_remote: bool,
     pub access_limited: usize,
+    pub truncated_sockets: usize,
     pub warnings: Vec<String>,
     pub traffic_counters: bool,
 }
@@ -139,6 +140,7 @@ mod platform {
             source,
             udp_remote: true,
             access_limited: denied_before.max(denied_after),
+            truncated_sockets: 0,
             warnings,
             traffic_counters,
         })
@@ -368,44 +370,24 @@ mod platform {
 mod platform {
     use std::io;
 
-    use super::{NativeSnapshot, RawSocket};
-    use crate::model::{ConnState, Protocol};
+    use super::NativeSnapshot;
 
     pub fn snapshot(include_udp: bool, _enhanced: bool) -> io::Result<NativeSnapshot> {
-        let mut sockets = crate::collect::udp::tcp_snapshot()?;
+        let scan = crate::collect::udp::snapshot(include_udp)?;
         let mut warnings = Vec::new();
-        let mut access_limited = 0;
-        let mut udp_remote = !include_udp;
-        if include_udp {
-            match crate::collect::udp::snapshot() {
-                Ok(udp) => {
-                    access_limited = udp.skipped_processes;
-                    udp_remote = true;
-                    sockets.extend(udp.observations.into_iter().map(|socket| RawSocket {
-                        protocol: Protocol::Udp,
-                        local: socket.local,
-                        remote: socket.remote,
-                        state: ConnState::Established,
-                        pids: socket.pids,
-                        native_id: 0,
-                        counters: None,
-                    }));
-                }
-                Err(error) => {
-                    udp_remote = false;
-                    warnings.push(format!("Connected UDP collection is unavailable: {error}"));
-                }
-            }
+        if scan.truncated_sockets > 0 {
+            warnings.push(format!(
+                "{} socket records exceeded the collector safety limit",
+                scan.truncated_sockets
+            ));
         }
+        let _transient_processes = scan.transient_processes;
         Ok(NativeSnapshot {
-            sockets,
-            source: if cfg!(target_os = "macos") {
-                "macos-libproc"
-            } else {
-                "windows-ip-helper"
-            },
-            udp_remote,
-            access_limited,
+            sockets: scan.sockets,
+            source: "macos-libproc",
+            udp_remote: include_udp,
+            access_limited: scan.inaccessible_processes,
+            truncated_sockets: scan.truncated_sockets,
             warnings,
             traffic_counters: false,
         })
@@ -460,6 +442,7 @@ mod platform {
             source: "windows-ip-helper",
             udp_remote,
             access_limited,
+            truncated_sockets: 0,
             warnings,
             traffic_counters: false,
         })

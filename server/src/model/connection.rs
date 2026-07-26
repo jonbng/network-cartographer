@@ -222,6 +222,8 @@ pub struct DestStats {
     pub protocol: Protocol,
     pub process_ids: std::collections::BTreeSet<String>,
     pub hit_count: u64,
+    /// Number of live socket observations contributing to this destination.
+    pub active_observations: u64,
     #[allow(dead_code)]
     pub first_seen: Instant,
     pub last_seen: Instant,

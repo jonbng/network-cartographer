@@ -1,4 +1,20 @@
 import Globe from "globe.gl";
+import {
+  ambientRouteCandidates,
+  ambientMotionAllowed,
+  buildPulsePathPoints,
+  chooseAmbientRoute,
+  classifySegment,
+  gapShouldAnimate,
+  isLocated,
+  segmentVisualState,
+  selectionAllowsMotion,
+  type PulsePoint,
+  type SegmentKind,
+} from "./globe-geometry";
+
+export { buildPulsePathPoints, classifySegment } from "./globe-geometry";
+export type { PulsePoint } from "./globe-geometry";
 
 export type GlobeHop = {
   ttl: number;
@@ -20,7 +36,9 @@ export type GlobePath = {
   id: string;
   appId: string;
   app: string;
+  appIconUrl?: string | null;
   host: string;
+  destinationOrg?: string | null;
   ip: string;
   port: number;
   protocol: string;
@@ -31,6 +49,7 @@ export type GlobePath = {
   color: string;
   hops: GlobeHop[];
   status: string;
+  freshness: "fresh" | "refreshing" | "stale";
   rttMs: number | null;
   reachedTarget: boolean;
   targetRttMs: number | null;
@@ -51,6 +70,15 @@ export type NetworkOrigin = {
     strength: "strong" | "supporting";
     label: string;
   }>;
+  transition?: NetworkTransition | null;
+};
+
+export type NetworkTransition = {
+  id: number;
+  status: "detecting" | "ready" | "unavailable";
+  ageSeconds: number;
+  previousExit: NetworkExit | null;
+  currentExit: NetworkExit | null;
 };
 
 export type NetworkExit = {
@@ -93,6 +121,25 @@ export type HopSelection = {
   routes: HopRouteChoice[];
 };
 
+export type GlobeSegmentKind = SegmentKind;
+
+export type GlobeSegmentSelection = {
+  pathId: string;
+  app: string;
+  host: string;
+  fromTtl: number;
+  toTtl: number;
+  kind: GlobeSegmentKind;
+  missingResponses: number;
+  unlocatedHops: number;
+};
+
+export type PathSelectionOptions = {
+  frame?: boolean;
+  preview?: boolean;
+  instant?: boolean;
+};
+
 type PathThrough = {
   pathId: string;
   app: string;
@@ -130,6 +177,14 @@ type Point = {
 
 type OriginRing = { lat: number; lng: number };
 
+type GapLabel = {
+  lat: number;
+  lng: number;
+  altitude: number;
+  label: "?";
+  isGapLabel: true;
+};
+
 type Arc = {
   startLat: number;
   startLng: number;
@@ -141,8 +196,25 @@ type Arc = {
   host: string;
   dimmed: boolean;
   stroke: number;
-  uncertain: boolean;
+  fromTtl: number;
+  toTtl: number;
+  kind: GlobeSegmentKind;
+  missingResponses: number;
+  unlocatedHops: number;
+  traceStatus: string;
 };
+
+type PulsePath = {
+  points: PulsePoint[];
+  color: string;
+  stroke: number;
+  dashLength: number;
+  dashGap: number;
+  duration: number;
+  tone: "selected" | "ambient";
+};
+
+type HighlightedHop = { pathId: string; ttl: number };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let globe: any = null;
@@ -155,6 +227,16 @@ let hasUserMovedCamera = false;
 let lastFrameBounds: string | null = null;
 let onHopClick: ((selection: HopSelection) => void) | null = null;
 let onOriginClick: ((origin: NetworkOrigin) => void) | null = null;
+let onSegmentClick: ((selection: GlobeSegmentSelection) => void) | null = null;
+let hoveredSegmentKey: string | null = null;
+let highlightedHop: HighlightedHop | null = null;
+let currentPaths: GlobePath[] = [];
+let reduceMotion = false;
+let motionRun = 0;
+let pulseTimer: ReturnType<typeof setTimeout> | null = null;
+let pulseClearTimer: ReturnType<typeof setTimeout> | null = null;
+let lastAmbientPathId: string | null = null;
+let cameraInteracting = false;
 
 const PALETTE = [
   "#e0a86a",
@@ -184,6 +266,8 @@ export function colorForKey(key: string): string {
 export function setFocusedApp(app: string | null) {
   focusedApps = new Set();
   if (app) focusedApps.add(app);
+  cancelPulse();
+  scheduleAmbientPulse();
   lastKey = "";
 }
 
@@ -196,13 +280,37 @@ export function setFocusedApps(apps: string[]) {
     return;
   }
   focusedApps = next;
+  cancelPulse();
+  scheduleAmbientPulse();
   lastKey = "";
 }
 
-export function setSelectedPath(pathId: string | null) {
-  if (selectedPathId === pathId) return;
+export function setSelectedPath(
+  pathId: string | null,
+  options: PathSelectionOptions = {},
+) {
+  const changed = selectedPathId !== pathId;
   selectedPathId = pathId;
   lastKey = "";
+  cancelPulse();
+  if (!pathId || !changed) {
+    scheduleAmbientPulse();
+    return;
+  }
+
+  const path = currentPaths.find((candidate) => candidate.id === pathId);
+  if (!path) return;
+  const instant = !selectionAllowsMotion(reduceMotion, options.instant === true);
+  const frameDuration = instant ? 0 : 450;
+  if (options.frame) framePath(path, frameDuration);
+  if (options.preview && !instant) {
+    const run = motionRun;
+    const delay = options.frame ? frameDuration : 0;
+    pulseTimer = setTimeout(() => {
+      if (run !== motionRun || cameraInteracting) return;
+      playPathPreview(path, "selected");
+    }, delay);
+  } else scheduleAmbientPulse();
 }
 
 export function getFocusedApp(): string | null {
@@ -231,11 +339,38 @@ export function setOriginClickHandler(
   onOriginClick = fn;
 }
 
+export function setSegmentClickHandler(
+  fn: ((selection: GlobeSegmentSelection) => void) | null,
+) {
+  onSegmentClick = fn;
+}
+
+export function setHighlightedHop(hop: HighlightedHop | null) {
+  if (
+    highlightedHop?.pathId === hop?.pathId &&
+    highlightedHop?.ttl === hop?.ttl
+  ) {
+    return;
+  }
+  highlightedHop = hop;
+  lastKey = "";
+  rerenderCurrentPaths();
+}
+
 export function initGlobe(container: HTMLElement) {
   if (globe) return globe;
 
   // Keep browser page zoom off the globe interaction surface.
   preventPageZoom(container);
+  const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+  reduceMotion = motionQuery.matches;
+  motionQuery.addEventListener("change", (event) => {
+    reduceMotion = event.matches;
+    cancelPulse();
+    lastKey = "";
+    rerenderCurrentPaths();
+    scheduleAmbientPulse();
+  });
 
   globe = new Globe(container)
     .backgroundColor("rgba(0,0,0,0)")
@@ -275,16 +410,49 @@ export function initGlobe(container: HTMLElement) {
     .arcColor((d: object) => {
       const a = d as Arc;
       if (a.dimmed) return ["rgba(120,140,160,0.1)", "rgba(120,140,160,0.06)"];
+      if (a.kind === "unmapped") {
+        return isArcEmphasized(a) ? "#f2c66d" : "rgba(217,185,110,0.76)";
+      }
       return a.color;
     })
-    .arcStroke((d: object) => (d as Arc).stroke)
+    .arcStroke((d: object) => {
+      const arc = d as Arc;
+      return isArcEmphasized(arc) ? Math.max(0.66, arc.stroke * 1.65) : arc.stroke;
+    })
     .arcAltitudeAutoScale(0.26)
-    .arcDashLength((d: object) => ((d as Arc).uncertain ? 0.18 : 1))
-    .arcDashGap((d: object) => ((d as Arc).uncertain ? 0.18 : 0))
-    .arcDashAnimateTime((d: object) => ((d as Arc).uncertain ? 2800 : 0))
+    .arcDashLength((d: object) => ((d as Arc).kind === "unmapped" ? 0.09 : 1))
+    .arcDashGap((d: object) => ((d as Arc).kind === "unmapped" ? 0.055 : 0))
+    .arcDashAnimateTime((d: object) => {
+      const arc = d as Arc;
+      return !arc.dimmed && gapShouldAnimate(arc.kind, arc.traceStatus, reduceMotion)
+        ? 2800
+        : 0;
+    })
+    .arcLabel((d: object) => segmentTooltip(d as Arc))
+    .onArcHover((d: object | null) => {
+      const next = d ? arcKey(d as Arc) : null;
+      if (hoveredSegmentKey === next) return;
+      hoveredSegmentKey = next;
+      lastKey = "";
+      rerenderCurrentPaths();
+    })
+    .onArcClick((d: object) => {
+      const arc = d as Arc;
+      onSegmentClick?.(segmentSelection(arc));
+    })
     .arcsTransitionDuration(0)
     .pointsTransitionDuration(0)
     .labelsTransitionDuration(0)
+    .pathPoints("points")
+    .pathPointLat("lat")
+    .pathPointLng("lng")
+    .pathPointAlt("altitude")
+    .pathColor("color")
+    .pathStroke((d: object) => (d as PulsePath).stroke)
+    .pathDashLength((d: object) => (d as PulsePath).dashLength)
+    .pathDashGap((d: object) => (d as PulsePath).dashGap)
+    .pathDashAnimateTime((d: object) => (d as PulsePath).duration)
+    .pathTransitionDuration(0)
     .ringLat("lat")
     .ringLng("lng")
     .ringColor(() => (time: number) => `rgba(94,234,212,${Math.max(0, 0.42 - time * 0.34)})`)
@@ -305,8 +473,14 @@ export function initGlobe(container: HTMLElement) {
   // Remember that the user took over the camera
   const markMoved = () => {
     hasUserMovedCamera = true;
+    cameraInteracting = true;
+    cancelPulse();
   };
   controls.addEventListener("start", markMoved);
+  controls.addEventListener("end", () => {
+    cameraInteracting = false;
+    scheduleAmbientPulse();
+  });
   container.addEventListener(
     "wheel",
     (e) => {
@@ -318,6 +492,10 @@ export function initGlobe(container: HTMLElement) {
     { passive: false },
   );
   container.addEventListener("pointerdown", markMoved);
+  document.addEventListener("visibilitychange", () => {
+    cancelPulse();
+    if (!document.hidden) scheduleAmbientPulse();
+  });
 
   globe.pointOfView({ lat: 30, lng: -40, altitude: 1.9 }, 0);
 
@@ -485,9 +663,12 @@ let currentOrigin: NetworkOrigin | null = null;
 function geometryKey(paths: GlobePath[], origin: NetworkOrigin | null): string {
   const focus = [...focusedApps].sort().join(",");
   const exit = origin?.exit;
-  let s = `${showLabels ? 1 : 0}|${focus}|${selectedPathId ?? ""}|${density}|${origin?.status ?? ""}:${origin?.assessment ?? ""}:${exit?.lat ?? ""},${exit?.lon ?? ""}:${exit?.city ?? ""}|`;
+  const highlighted = highlightedHop
+    ? `${highlightedHop.pathId}:${highlightedHop.ttl}`
+    : "";
+  let s = `${showLabels ? 1 : 0}|${focus}|${selectedPathId ?? ""}|${hoveredSegmentKey ?? ""}|${highlighted}|${density}|${reduceMotion ? 1 : 0}|${origin?.status ?? ""}:${origin?.assessment ?? ""}:${exit?.lat ?? ""},${exit?.lon ?? ""}:${exit?.city ?? ""}|`;
   for (const p of paths) {
-    s += `${p.id}:${p.reachedTarget ? 1 : 0}`;
+    s += `${p.id}:${p.reachedTarget ? 1 : 0}:${p.status}`;
     for (const h of p.hops) {
       if (h.lat == null || h.lon == null) continue;
       // city name matters for labels but only once geocoded
@@ -504,6 +685,8 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
   hopCount: number;
   destCount: number;
 } {
+  currentPaths = paths;
+  scheduleAmbientPulse();
   if (!globe) return { pathCount: 0, hopCount: 0, destCount: 0 };
 
   const pathCount = paths.filter((p) => p.hops.some((h) => h.lat != null)).length;
@@ -649,7 +832,7 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
       const b = arcHops[i + 1];
       const isLastArc = i === arcHops.length - 2;
       const bIsTarget = path.reachedTarget && b.addr === path.ip;
-      const uncertain = hasUnmappedGap(path.hops, a.ttl, b.ttl);
+      const segment = classifySegment(path.hops, a.ttl, b.ttl);
       arcs.push({
         startLat: a.lat as number,
         startLng: a.lon as number,
@@ -665,7 +848,10 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
         host: path.host,
         dimmed,
         stroke: dimmed ? 0.12 : bIsTarget ? 0.55 : isLastArc ? 0.42 : 0.35,
-        uncertain,
+        fromTtl: a.ttl,
+        toTtl: b.ttl,
+        traceStatus: path.status,
+        ...segment,
       });
     }
   }
@@ -695,6 +881,22 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
     const alpha = confidenceAlpha(p.geoConfidence);
     return alpha < 1 ? { ...p, color: withAlpha(p.color, alpha) } : p;
   });
+
+  if (highlightedHop) {
+    points = points.map((point) => {
+      const highlighted = point.through.some(
+        (route) =>
+          route.pathId === highlightedHop?.pathId &&
+          route.ttl === highlightedHop.ttl,
+      );
+      if (!highlighted) return point;
+      return {
+        ...point,
+        size: Math.max(point.size * 1.55, 0.34),
+        color: point.isDestination ? "#f9a8d4" : "#f4e3b2",
+      };
+    });
+  }
 
   if (density === "hubs") {
     points = points.filter(
@@ -743,11 +945,22 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
   globe.pointsData(points);
   globe.arcsData(arcs);
   globe.ringsData(
-    originPoint ? ([{ lat: originPoint.lat, lng: originPoint.lng }] satisfies OriginRing[]) : [],
+    originPoint && !reduceMotion
+      ? ([{ lat: originPoint.lat, lng: originPoint.lng }] satisfies OriginRing[])
+      : [],
   );
 
-  if (showLabels && points.length > 0) {
-    const labels = pickLabels(points);
+  if ((showLabels || selectedPathId || hoveredSegmentKey) && points.length > 0) {
+    const labels: Array<Point | GapLabel> = showLabels ? pickLabels(points) : [];
+    const gapLabels = arcs
+      .filter(
+        (arc) =>
+          arc.kind === "unmapped" &&
+          (arcKey(arc) === hoveredSegmentKey ||
+            selectedPathId === arc.pathId),
+      )
+      .map(gapLabelForArc);
+    labels.push(...gapLabels);
     globe
       .labelsData(labels)
       .labelLat("lat")
@@ -756,18 +969,22 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
       // Globe labels use angular units, so values around 1 become enormous
       // when the camera frames a dense metro area. Keep them secondary to
       // the nodes and routes they describe.
-      .labelSize((d: object) =>
-        (d as Point).isOrigin ? 0.44 : (d as Point).isDestination ? 0.48 : 0.34,
-      )
-      .labelDotRadius(0)
+      .labelSize((d: object) => {
+        if (isGapLabel(d)) return 0.46;
+        const point = d as Point;
+        return point.isOrigin ? 0.44 : point.isDestination ? 0.48 : 0.34;
+      })
+      .labelDotRadius((d: object) => (isGapLabel(d) ? 0.24 : 0))
       .labelColor((d: object) =>
-        (d as Point).isOrigin
+        isGapLabel(d)
+          ? "rgba(242,198,109,0.96)"
+          : (d as Point).isOrigin
           ? "rgba(125,211,199,0.94)"
           : (d as Point).isDestination
           ? "rgba(249,168,212,0.84)"
           : "rgba(226,232,240,0.58)",
       )
-      .labelAltitude(0.018)
+      .labelAltitude((d: object) => (isGapLabel(d) ? (d as GapLabel).altitude : 0.018))
       .labelResolution(3);
   } else {
     globe.labelsData([]);
@@ -788,14 +1005,76 @@ function labelForDestination(path: GlobePath, hop: GlobeHop): string {
   return host.length > 18 ? host.slice(0, 16) + "…" : host;
 }
 
-function hasUnmappedGap(hops: GlobeHop[], fromTtl: number, toTtl: number): boolean {
-  if (toTtl - fromTtl > 1) return true;
-  return hops.some(
-    (hop) =>
-      hop.ttl > fromTtl &&
-      hop.ttl < toTtl &&
-      (hop.lat == null || hop.lon == null),
+function arcKey(arc: Arc): string {
+  return `${arc.pathId}:${arc.fromTtl}-${arc.toTtl}`;
+}
+
+function isArcHighlightedByHop(arc: Arc): boolean {
+  return (
+    highlightedHop?.pathId === arc.pathId &&
+    (highlightedHop.ttl === arc.fromTtl || highlightedHop.ttl === arc.toTtl)
   );
+}
+
+function isArcEmphasized(arc: Arc): boolean {
+  return segmentVisualState(
+    arc.dimmed,
+    hoveredSegmentKey === arcKey(arc),
+    isArcHighlightedByHop(arc),
+  ) === "emphasized";
+}
+
+function segmentSelection(arc: Arc): GlobeSegmentSelection {
+  return {
+    pathId: arc.pathId,
+    app: arc.app,
+    host: arc.host,
+    fromTtl: arc.fromTtl,
+    toTtl: arc.toTtl,
+    kind: arc.kind,
+    missingResponses: arc.missingResponses,
+    unlocatedHops: arc.unlocatedHops,
+  };
+}
+
+function segmentTooltip(arc: Arc): string {
+  const selection = segmentSelection(arc);
+  const title = selection.kind === "observed" ? "Observed segment" : "Unmapped span";
+  let details = selection.kind === "unmapped"
+    ? [
+        selection.missingResponses
+          ? `${selection.missingResponses} no response${selection.missingResponses === 1 ? "" : "s"}`
+          : "",
+        selection.unlocatedHops
+          ? `${selection.unlocatedHops} location${selection.unlocatedHops === 1 ? "" : "s"} unavailable`
+          : "",
+      ].filter(Boolean).join(" · ")
+    : "Both endpoints were mapped";
+  if (!arc.dimmed && gapShouldAnimate(arc.kind, arc.traceStatus, reduceMotion)) {
+    details += " · traceroute in progress";
+  }
+  return `<div style="font-family:ui-monospace,monospace;font-size:11px;line-height:1.45;padding:4px 2px;max-width:270px">
+    <div style="color:${selection.kind === "unmapped" ? "#f2c66d" : "#e8e3d8"};font-weight:700">${title} · hop ${selection.fromTtl} → ${selection.toTtl}</div>
+    <div style="margin-top:3px;opacity:.72">${escapeHtml(selection.app)} → ${escapeHtml(prettyHost(selection.host))}</div>
+    <div style="margin-top:5px;opacity:.62">${details} · click to inspect</div>
+  </div>`;
+}
+
+function gapLabelForArc(arc: Arc): GapLabel {
+  const from = latLngVector(arc.startLat, arc.startLng);
+  const to = latLngVector(arc.endLat, arc.endLng);
+  const omega = Math.acos(clamp(dot(from, to), -1, 1));
+  const position = vectorLatLng(slerp(from, to, omega, 0.5));
+  return {
+    ...position,
+    altitude: 0.026 + Math.min(0.24, Math.max(0.025, omega * 0.12)),
+    label: "?",
+    isGapLabel: true,
+  };
+}
+
+function isGapLabel(value: object): value is GapLabel {
+  return (value as Partial<GapLabel>).isGapLabel === true;
 }
 
 function confidenceLabel(score: number | null): string {
@@ -934,6 +1213,166 @@ function isNoisyLabel(s: string): boolean {
   return false;
 }
 
+type Vector3 = { x: number; y: number; z: number };
+
+function latLngVector(lat: number, lng: number): Vector3 {
+  const phi = (90 - lat) * (Math.PI / 180);
+  const theta = (lng + 180) * (Math.PI / 180);
+  return {
+    x: -Math.sin(phi) * Math.cos(theta),
+    y: Math.cos(phi),
+    z: Math.sin(phi) * Math.sin(theta),
+  };
+}
+
+function vectorLatLng(vector: Vector3): { lat: number; lng: number } {
+  const length = Math.hypot(vector.x, vector.y, vector.z) || 1;
+  const x = vector.x / length;
+  const y = vector.y / length;
+  const z = vector.z / length;
+  const rawLng = Math.atan2(z, -x) * (180 / Math.PI) - 180;
+  return {
+    lat: 90 - Math.acos(clamp(y, -1, 1)) * (180 / Math.PI),
+    lng: ((rawLng + 540) % 360) - 180,
+  };
+}
+
+function dot(a: Vector3, b: Vector3): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+function slerp(a: Vector3, b: Vector3, omega: number, t: number): Vector3 {
+  if (omega < 0.00001) return a;
+  const sinOmega = Math.sin(omega);
+  if (Math.abs(sinOmega) < 0.00001) {
+    return {
+      x: a.x + (b.x - a.x) * t,
+      y: a.y + (b.y - a.y) * t,
+      z: a.z + (b.z - a.z) * t,
+    };
+  }
+  const fromWeight = Math.sin((1 - t) * omega) / sinOmega;
+  const toWeight = Math.sin(t * omega) / sinOmega;
+  return {
+    x: a.x * fromWeight + b.x * toWeight,
+    y: a.y * fromWeight + b.y * toWeight,
+    z: a.z * fromWeight + b.z * toWeight,
+  };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function rerenderCurrentPaths() {
+  if (!globe || currentPaths.length === 0) return;
+  updateAllPaths(currentPaths, currentOrigin);
+}
+
+function cancelPulse() {
+  motionRun += 1;
+  if (pulseTimer) clearTimeout(pulseTimer);
+  if (pulseClearTimer) clearTimeout(pulseClearTimer);
+  pulseTimer = null;
+  pulseClearTimer = null;
+  globe?.pathsData([]);
+}
+
+function playPathPreview(path: GlobePath, tone: PulsePath["tone"]) {
+  pulseTimer = null;
+  if (!globe || reduceMotion || document.hidden || cameraInteracting) return;
+  if (tone === "selected" && selectedPathId !== path.id) return;
+  const points = buildPulsePathPoints(path.hops);
+  if (points.length < 2) {
+    scheduleAmbientPulse();
+    return;
+  }
+  const run = motionRun;
+  const selected = tone === "selected";
+  const duration = selected ? 1200 : 1600;
+  globe.pathsData([{
+    points,
+    color: selected ? "#fff0b7" : withAlpha(path.color, 0.55),
+    stroke: selected ? 0.72 : 0.42,
+    dashLength: selected ? 0.045 : 0.032,
+    dashGap: selected ? 0.955 : 0.968,
+    duration,
+    tone,
+  } satisfies PulsePath]);
+  pulseClearTimer = setTimeout(() => {
+    if (run !== motionRun) return;
+    globe?.pathsData([]);
+    pulseClearTimer = null;
+    scheduleAmbientPulse();
+  }, duration);
+}
+
+function scheduleAmbientPulse(delay = ambientDelay()) {
+  if (
+    pulseTimer ||
+    pulseClearTimer ||
+    !globe ||
+    !ambientMotionAllowed(reduceMotion, document.hidden, cameraInteracting)
+  ) {
+    return;
+  }
+  const candidates = ambientRouteCandidates(
+    currentPaths.map((path) => ({
+      id: path.id,
+      appId: path.appId,
+      mappedHopCount: path.hops.filter(isLocated).length,
+      path,
+    })),
+    selectedPathId,
+    focusedApps,
+  );
+  const next = chooseAmbientRoute(candidates, lastAmbientPathId);
+  if (!next) return;
+  const run = motionRun;
+  pulseTimer = setTimeout(() => {
+    if (run !== motionRun) return;
+    pulseTimer = null;
+    const eligibleNow = ambientRouteCandidates(
+      currentPaths.map((path) => ({
+        id: path.id,
+        appId: path.appId,
+        mappedHopCount: path.hops.filter(isLocated).length,
+        path,
+      })),
+      selectedPathId,
+      focusedApps,
+    );
+    const current = eligibleNow.find((candidate) => candidate.id === next.id);
+    if (!current) {
+      scheduleAmbientPulse();
+      return;
+    }
+    lastAmbientPathId = current.id;
+    playPathPreview(current.path, "ambient");
+  }, delay);
+}
+
+function ambientDelay(): number {
+  return 4000 + Math.round(Math.random() * 3000);
+}
+
+function framePath(path: GlobePath, duration: number) {
+  if (!globe) return;
+  const located = path.hops.filter(isLocated);
+  if (located.length === 0) return;
+  hasUserMovedCamera = false;
+  const lats = located.map((hop) => hop.lat as number);
+  const lngs = located.map((hop) => hop.lon as number);
+  const x = lngs.reduce((sum, lng) => sum + Math.cos(lng * Math.PI / 180), 0);
+  const y = lngs.reduce((sum, lng) => sum + Math.sin(lng * Math.PI / 180), 0);
+  const midLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+  const midLng = Math.atan2(y, x) * 180 / Math.PI;
+  const lngSpan = Math.max(...lngs.map((lng) => Math.abs(wrappedLongitudeDelta(lng, midLng))));
+  const span = Math.max(Math.max(...lats) - Math.min(...lats), lngSpan * 2, 8);
+  const altitude = Math.min(2.65, Math.max(1.25, span / 34));
+  globe.pointOfView({ lat: midLat, lng: midLng, altitude }, duration);
+}
+
 function maybeFrameCamera(lats: number[], lngs: number[]) {
   if (!globe || lats.length === 0) return;
   if (hasUserMovedCamera) return;
@@ -979,12 +1418,17 @@ function escapeHtml(s: string): string {
 }
 
 export function clearGlobe() {
+  cancelPulse();
   lastKey = "";
   lastFrameBounds = null;
   hasUserMovedCamera = false;
+  currentPaths = [];
+  hoveredSegmentKey = null;
+  highlightedHop = null;
   if (!globe) return;
   globe.pointsData([]);
   globe.arcsData([]);
+  globe.pathsData([]);
   globe.labelsData([]);
   globe.ringsData([]);
 }

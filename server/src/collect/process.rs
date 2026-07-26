@@ -64,20 +64,31 @@ impl ProcessCache {
                 .filter(|cached| cached.start_time == start_time)
                 .map(|cached| cached.app_hint.clone())
                 .unwrap_or_else(|| platform_app_hint(pid));
-            self.map.insert(
+            let mut entry = CachedProcess {
                 pid,
-                CachedProcess {
-                    pid,
-                    start_time,
-                    parent_pid: process.parent().map(Pid::as_u32),
-                    name: process.name().to_string_lossy().into_owned(),
-                    path: process.exe().map(Path::to_path_buf),
-                    user: format!("{:?}", process.user_id()),
-                    session: process.session_id().map(Pid::as_u32),
-                    app_hint,
-                    last_seen: now,
-                },
-            );
+                start_time,
+                parent_pid: process.parent().map(Pid::as_u32),
+                name: process.name().to_string_lossy().into_owned(),
+                path: process.exe().map(Path::to_path_buf),
+                user: format!("{:?}", process.user_id()),
+                session: process.session_id().map(Pid::as_u32),
+                app_hint,
+                last_seen: now,
+            };
+            if entry.path.is_none() || entry.name.trim().is_empty() {
+                if let Some(native) = platform_process_fallback(pid) {
+                    if entry.path.is_none() {
+                        entry.path = native.path;
+                    }
+                    if entry.name.trim().is_empty() {
+                        entry.name = native.name;
+                    }
+                    if entry.parent_pid.is_none() {
+                        entry.parent_pid = native.parent_pid;
+                    }
+                }
+            }
+            self.map.insert(pid, entry);
         }
         self.map
             .retain(|_, entry| now.duration_since(entry.last_seen) <= DEAD_PROCESS_TTL);
@@ -101,6 +112,11 @@ impl ProcessCache {
             self.system
                 .refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
             self.rebuild_map();
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.map.entry(pid) {
+                if let Some(owner) = platform_process_fallback(pid) {
+                    entry.insert(owner);
+                }
+            }
         }
 
         let Some(owner) = self.map.get(&pid).cloned() else {
@@ -158,6 +174,84 @@ impl ProcessCache {
         }
         current
     }
+
+    fn is_in_process_tree(&self, pid: u32, root_pid: u32) -> bool {
+        let mut current = pid;
+        for _ in 0..64 {
+            if current == root_pid {
+                return true;
+            }
+            let Some(parent) = self.map.get(&current).and_then(|entry| entry.parent_pid) else {
+                return false;
+            };
+            current = parent;
+        }
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_process_fallback(pid: u32) -> Option<CachedProcess> {
+    use std::ffi::{c_char, CStr};
+
+    #[repr(C)]
+    struct NativeIdentity {
+        parent_pid: u32,
+        start_time: u64,
+        user_id: u32,
+        session_id: i32,
+        name: [c_char; 256],
+        path: [c_char; 4096],
+    }
+
+    unsafe extern "C" {
+        fn nc_read_process_identity(pid: i32, output: *mut NativeIdentity) -> i32;
+    }
+
+    let mut native = NativeIdentity {
+        parent_pid: 0,
+        start_time: 0,
+        user_id: 0,
+        session_id: -1,
+        name: [0; 256],
+        path: [0; 4096],
+    };
+    if unsafe { nc_read_process_identity(pid as i32, &mut native) } != 0 {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr(native.name.as_ptr()) }
+        .to_string_lossy()
+        .trim()
+        .to_string();
+    let native_path = unsafe { CStr::from_ptr(native.path.as_ptr()) };
+    let path = (!native_path.to_bytes().is_empty())
+        .then(|| PathBuf::from(native_path.to_string_lossy().as_ref()));
+    if name.is_empty() && path.is_none() {
+        return None;
+    }
+    Some(CachedProcess {
+        pid,
+        start_time: native.start_time,
+        parent_pid: (native.parent_pid > 0).then_some(native.parent_pid),
+        name: if name.is_empty() {
+            path.as_deref()
+                .and_then(Path::file_name)
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("pid-{pid}"))
+        } else {
+            name
+        },
+        path,
+        user: format!("uid:{}", native.user_id),
+        session: (native.session_id >= 0).then_some(native.session_id as u32),
+        app_hint: platform_app_hint(pid),
+        last_seen: Instant::now(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_process_fallback(_pid: u32) -> Option<CachedProcess> {
+    None
 }
 
 fn same_application_family(child: &CachedProcess, parent: &CachedProcess) -> bool {
@@ -913,6 +1007,15 @@ pub fn resolve_info(pid: u32) -> ProcessIdentity {
         .unwrap_or_else(|_| unknown_process(pid))
 }
 
+/// Remove the monitor and any commands it spawned from an owner PID list.
+/// Unknown PIDs are retained so short-lived third-party traffic does not
+/// disappear merely because its process exited before attribution.
+pub fn retain_outside_process_tree(pids: &mut Vec<u32>, root_pid: u32) {
+    if let Ok(cache) = cache().lock() {
+        pids.retain(|pid| !cache.is_in_process_tree(*pid, root_pid));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,5 +1054,36 @@ mod tests {
         let child = cached(2, Some(1), "/usr/bin/curl");
         let parent = cached(1, None, "/usr/bin/zsh");
         assert!(!same_application_family(&child, &parent));
+    }
+
+    #[test]
+    fn spawned_commands_are_recognized_as_part_of_process_tree() {
+        let mut map = HashMap::new();
+        map.insert(10, cached(10, None, "/opt/netcart"));
+        map.insert(11, cached(11, Some(10), "/usr/bin/traceroute"));
+        map.insert(12, cached(12, Some(11), "/usr/bin/helper"));
+        map.insert(20, cached(20, None, "/usr/bin/browser"));
+        let cache = ProcessCache {
+            system: System::new(),
+            map,
+            last_refresh: Instant::now(),
+        };
+
+        assert!(cache.is_in_process_tree(10, 10));
+        assert!(cache.is_in_process_tree(11, 10));
+        assert!(cache.is_in_process_tree(12, 10));
+        assert!(!cache.is_in_process_tree(20, 10));
+        assert!(!cache.is_in_process_tree(999, 10));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn libproc_fallback_identifies_current_process() {
+        let process = platform_process_fallback(std::process::id())
+            .expect("libproc should identify the current process");
+        assert_eq!(process.pid, std::process::id());
+        assert!(!process.name.is_empty());
+        assert!(process.path.is_some());
+        assert!(process.start_time > 0);
     }
 }

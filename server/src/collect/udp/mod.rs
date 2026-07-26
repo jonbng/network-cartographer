@@ -23,7 +23,5 @@ mod windows;
 
 #[cfg(target_os = "macos")]
 pub use macos::snapshot;
-#[cfg(target_os = "macos")]
-pub use macos::tcp_snapshot;
 #[cfg(target_os = "windows")]
 pub use windows::snapshot;

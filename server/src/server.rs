@@ -10,7 +10,7 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Request, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Request, State},
     http::{header, HeaderMap, StatusCode, Uri},
     middleware::{self, Next},
     response::{sse::Event, IntoResponse, Response, Sse},
@@ -23,6 +23,7 @@ use tokio::sync::broadcast;
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
 use crate::{
+    app_icons::icon_id_from_request,
     collect::SniObservation,
     dto::{PathChangedEvent, SettingsDto, SnapshotDto},
     monitor::Monitor,
@@ -73,19 +74,18 @@ pub async fn run() -> Result<(), String> {
         .route("/api/settings", get(settings).put(update_settings))
         .route("/api/reset", post(reset))
         .route("/api/trace-all", post(trace_all))
+        .route("/api/trace/{ip}", post(trace_one))
         .route(
             "/api/observations/sni",
             post(record_sni).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/api/events", get(event_stream))
+        .route("/api/app-icons/{id}", get(app_icon))
         .fallback(get(static_asset))
         .with_state(state)
         .layer(middleware::from_fn(validate_host));
 
-    let address = SocketAddr::from(([127, 0, 0, 1], options.port));
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .map_err(|error| format!("could not listen on http://{address}: {error}"))?;
+    let (listener, used_fallback_port) = bind_listener(&options).await?;
     let address = listener
         .local_addr()
         .map_err(|error| format!("could not read server address: {error}"))?;
@@ -105,6 +105,9 @@ pub async fn run() -> Result<(), String> {
     }
     println!("  Status     Running");
     println!("  Dashboard  {url}");
+    if used_fallback_port {
+        println!("  Port       4769 was busy; using {}", address.port());
+    }
     println!("  Access     This machine only");
     if options.open_browser {
         if let Err(error) = webbrowser::open(&url) {
@@ -145,6 +148,28 @@ async fn snapshot(State(state): State<AppState>) -> Json<SnapshotDto> {
     Json(state.monitor.snapshot())
 }
 
+async fn app_icon(State(state): State<AppState>, AxumPath(request): AxumPath<String>) -> Response {
+    let Some(id) = icon_id_from_request(&request) else {
+        return (StatusCode::NOT_FOUND, "app icon not found").into_response();
+    };
+    let monitor = Arc::clone(&state.monitor);
+    let id = id.to_owned();
+    let bytes = tokio::task::spawn_blocking(move || monitor.app_icons.get(&id))
+        .await
+        .ok()
+        .flatten();
+    let Some(bytes) = bytes else {
+        return (StatusCode::NOT_FOUND, "app icon not found").into_response();
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CACHE_CONTROL, "private, max-age=3600, immutable")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(Body::from(bytes.to_vec()))
+        .unwrap()
+}
+
 async fn refresh(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -183,6 +208,19 @@ async fn trace_all(
     require_local_action(&headers)?;
     let ips = state.monitor.state.lock().unique_remote_ips();
     state.monitor.traces.lock().force_many(ips);
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn trace_one(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(ip): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_local_action(&headers)?;
+    let ip = ip
+        .parse::<IpAddr>()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid destination IP".into()))?;
+    state.monitor.traces.lock().force(ip);
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -350,14 +388,21 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
             .spawn(move || {
                 let mut next_hosted = Instant::now();
                 let mut retry = Duration::from_secs(30);
+                let poll_interval = if cfg!(target_os = "macos") {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::from_secs(10)
+                };
                 loop {
                     let route_changed = monitor.network_origin.refresh_local();
+                    let route_change_pending = monitor.network_origin.change_candidate_pending();
                     let local_only = monitor.settings.lock().geo_local_only;
                     let now = Instant::now();
-                    if !local_only && (route_changed || now >= next_hosted) {
-                        if route_changed {
-                            monitor.network_origin.invalidate_hosted();
-                        }
+                    if route_changed {
+                        monitor.handle_network_change();
+                    }
+                    if !local_only && !route_change_pending && (route_changed || now >= next_hosted)
+                    {
                         match monitor.network_origin.refresh_hosted() {
                             Ok(()) => {
                                 retry = Duration::from_secs(30);
@@ -369,10 +414,13 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
                             }
                         }
                     } else if local_only {
+                        if route_changed {
+                            monitor.network_origin.complete_local_transition();
+                        }
                         next_hosted = now;
                         retry = Duration::from_secs(30);
                     }
-                    thread::sleep(Duration::from_secs(10));
+                    thread::sleep(poll_interval);
                 }
             })
             .expect("spawn network origin observer");
@@ -433,6 +481,8 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
                         }
                         Err(error) => {
                             let _ = events.send(ServerEvent::Error(error));
+                            let _ =
+                                events.send(ServerEvent::Snapshot(Box::new(monitor.snapshot())));
                         }
                     }
                     last_socket_poll = Instant::now();
@@ -596,12 +646,33 @@ impl Drop for FeedDiscovery {
 
 struct Options {
     port: u16,
+    port_explicit: bool,
     open_browser: bool,
+}
+
+async fn bind_listener(options: &Options) -> Result<(tokio::net::TcpListener, bool), String> {
+    let address = SocketAddr::from(([127, 0, 0, 1], options.port));
+    match tokio::net::TcpListener::bind(address).await {
+        Ok(listener) => Ok((listener, false)),
+        Err(error) if !options.port_explicit && error.kind() == std::io::ErrorKind::AddrInUse => {
+            let fallback = SocketAddr::from(([127, 0, 0, 1], 0));
+            tokio::net::TcpListener::bind(fallback)
+                .await
+                .map(|listener| (listener, true))
+                .map_err(|fallback_error| {
+                    format!(
+                        "could not listen on http://{address} or another local port: {fallback_error}"
+                    )
+                })
+        }
+        Err(error) => Err(format!("could not listen on http://{address}: {error}")),
+    }
 }
 
 impl Options {
     fn from_env() -> Result<Self, String> {
         let mut port = 4769;
+        let mut port_explicit = false;
         let mut open_browser = true;
         let mut args = std::env::args().skip(1);
 
@@ -613,6 +684,7 @@ impl Options {
                     port = value
                         .parse::<u16>()
                         .map_err(|_| format!("invalid port: {value}"))?;
+                    port_explicit = true;
                 }
                 "-h" | "--help" => {
                     println!(
@@ -624,13 +696,52 @@ impl Options {
             }
         }
 
-        Ok(Self { port, open_browser })
+        Ok(Self {
+            port,
+            port_explicit,
+            open_browser,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn occupied_default_port_falls_back_to_loopback_ephemeral_port() {
+        let occupied = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("could not reserve test port: {error}"),
+        };
+        let port = occupied.local_addr().unwrap().port();
+        let options = Options {
+            port,
+            port_explicit: false,
+            open_browser: false,
+        };
+
+        let (listener, fallback) = bind_listener(&options).await.unwrap();
+        assert!(fallback);
+        assert_ne!(listener.local_addr().unwrap().port(), port);
+    }
+
+    #[tokio::test]
+    async fn occupied_explicit_port_is_an_error() {
+        let occupied = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("could not reserve test port: {error}"),
+        };
+        let options = Options {
+            port: occupied.local_addr().unwrap().port(),
+            port_explicit: true,
+            open_browser: false,
+        };
+
+        assert!(bind_listener(&options).await.is_err());
+    }
 
     fn test_state(token: &str) -> AppState {
         let (events, _) = broadcast::channel(2);
@@ -671,6 +782,16 @@ mod tests {
         headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
         let result = record_sni(State(test_state("secret")), headers, Json(observation())).await;
         assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn app_icon_route_rejects_non_opaque_ids() {
+        let response = app_icon(
+            State(test_state("secret")),
+            AxumPath("../../Applications/Safari.app".into()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
