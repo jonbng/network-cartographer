@@ -6,6 +6,7 @@ dist/
 dist-ssr/
 .next/
 *.local
+*.tsbuildinfo
 
 # Rust
 /target

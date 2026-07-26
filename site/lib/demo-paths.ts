@@ -91,5 +91,3 @@ export const DEMO_PATHS: DemoPath[] = [
     ],
   },
 ];
-
-export const DEMO_APPS = ["Firefox", "Spotify", "Code", "Slack"] as const;

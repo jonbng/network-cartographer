@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   ambientMotionAllowed,
   ambientRouteCandidates,
-  buildNewHopPulsePath,
+  arcDurationScale,
   buildPulsePathPoints,
   cameraCompensatedScale,
   chooseAmbientRoute,
   classifySegment,
   gapShouldAnimate,
+  mapLabelColor,
   segmentVisualState,
   selectionAllowsMotion,
   selectNonOverlappingLabels,
@@ -106,36 +107,19 @@ describe("buildPulsePathPoints", () => {
   });
 });
 
-describe("buildNewHopPulsePath", () => {
-  it("builds a directional pulse over only the newly mapped hop span", () => {
-    const previous = [
-      hop(2, { lat: 34.05, lon: -118.24 }),
-      hop(5, { lat: 39.1, lon: -94.58 }),
-    ];
-    const next = [
-      ...previous,
-      hop(8, { lat: 40.71, lon: -74.01 }),
-    ];
-
-    const points = buildNewHopPulsePath(previous, next);
-    expect(points[0].lat).toBeCloseTo(39.1);
-    expect(points[0].lng).toBeCloseTo(-94.58);
-    expect(points.at(-1)?.lat).toBeCloseTo(40.71);
-    expect(points.at(-1)?.lng).toBeCloseTo(-74.01);
-  });
-
-  it("does not replay when mapped route geometry is unchanged", () => {
-    const route = [hop(2), hop(5, { lat: 40, lon: 100 })];
-    expect(buildNewHopPulsePath(route, route)).toEqual([]);
-  });
-});
-
 describe("interaction state", () => {
   it("gives dimming precedence over transient emphasis", () => {
     expect(segmentVisualState(true, true, true)).toBe("dimmed");
     expect(segmentVisualState(false, true, false)).toBe("emphasized");
     expect(segmentVisualState(false, false, true)).toBe("emphasized");
     expect(segmentVisualState(false, false, false)).toBe("normal");
+  });
+
+  it("grays labels for cities outside the isolated application routes", () => {
+    expect(mapLabelColor("city", true)).toBe("rgba(120,140,160,0.24)");
+    expect(mapLabelColor("destination", true)).toBe("rgba(120,140,160,0.24)");
+    expect(mapLabelColor("city", false)).toBe("rgba(226,232,240,0.78)");
+    expect(mapLabelColor("destination", false)).toBe("rgba(249,168,212,0.84)");
   });
 
   it("disables motion for reduced-motion and keyboard selections", () => {
@@ -175,6 +159,21 @@ describe("camera-aware geometry", () => {
       segmentHasVisibleDistance(37.7749, -122.4194, 37.7762, -122.4194),
     ).toBe(true);
     expect(segmentHasVisibleDistance(0, 179.9, 0, -179.9)).toBe(true);
+  });
+});
+
+describe("arc dash timing", () => {
+  it("compensates for half of the visual speed difference between arc lengths", () => {
+    const short = arcDurationScale(0, 0, 0, 15);
+    const long = arcDurationScale(0, 0, 0, 60);
+    // The long arc is 4x the distance, but receives 2x the duration: it still
+    // moves faster, just not four times faster.
+    expect(long / short).toBeCloseTo(2);
+  });
+
+  it("caps extreme timing differences", () => {
+    expect(arcDurationScale(0, 0, 0, 0.01)).toBe(0.65);
+    expect(arcDurationScale(0, 0, 0, 180)).toBe(1.75);
   });
 });
 

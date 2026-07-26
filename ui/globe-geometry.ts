@@ -17,6 +17,8 @@ export type PulsePoint = { lat: number; lng: number; altitude: number };
 
 export type SegmentVisualState = "dimmed" | "emphasized" | "normal";
 
+export type MapLabelKind = "gap" | "origin" | "destination" | "city";
+
 const DEFAULT_CAMERA_ALTITUDE = 1.9;
 
 export type AmbientRouteCandidate = {
@@ -116,6 +118,23 @@ export function segmentHasVisibleDistance(
   return latDelta > 0.001 || lngDelta > 0.001;
 }
 
+/**
+ * Partially compensate dash duration for great-circle length.
+ *
+ * A 0.5 exponent is halfway between a fixed duration (long arcs look much
+ * faster) and fully distance-proportional timing (every arc has equal speed).
+ */
+export function arcDurationScale(
+  startLat: number,
+  startLng: number,
+  endLat: number,
+  endLng: number,
+  compensation = 0.5,
+): number {
+  const degrees = greatCircleDegrees(startLat, startLng, endLat, endLng);
+  return clamp((Math.max(degrees, 0.1) / 30) ** compensation, 0.65, 1.75);
+}
+
 export function ambientRouteCandidates<T extends AmbientRouteCandidate>(
   routes: T[],
   selectedPathId: string | null,
@@ -153,6 +172,16 @@ export function segmentVisualState(
   if (dimmed) return "dimmed";
   if (hovered || hopHighlighted) return "emphasized";
   return "normal";
+}
+
+export function mapLabelColor(kind: MapLabelKind, dimmed = false): string {
+  if (dimmed && kind !== "origin" && kind !== "gap") {
+    return "rgba(120,140,160,0.24)";
+  }
+  if (kind === "gap") return "rgba(242,198,109,0.96)";
+  if (kind === "origin") return "rgba(125,211,199,0.94)";
+  if (kind === "destination") return "rgba(249,168,212,0.84)";
+  return "rgba(226,232,240,0.78)";
 }
 
 export function classifySegment(
@@ -212,30 +241,6 @@ export function buildPulsePathPoints(hops: GeoHop[]): PulsePoint[] {
   return points;
 }
 
-/** Build only the newly revealed span of a progressively growing route. */
-export function buildNewHopPulsePath(
-  previousHops: GeoHop[],
-  nextHops: GeoHop[],
-): PulsePoint[] {
-  const previous = new Set(
-    previousHops.filter(isLocated).map(mappedHopKey),
-  );
-  const located = nextHops
-    .filter(isLocated)
-    .sort((a, b) => a.ttl - b.ttl);
-  const addedIndexes = located
-    .map((hop, index) => previous.has(mappedHopKey(hop)) ? -1 : index)
-    .filter((index) => index >= 0);
-  if (addedIndexes.length === 0 || located.length < 2) return [];
-
-  let start = Math.max(0, addedIndexes[0] - 1);
-  let end = addedIndexes[addedIndexes.length - 1];
-  // A location can arrive out of TTL order. Use the following known hop so
-  // the reveal still has a clear source and destination.
-  if (start === end && end < located.length - 1) end += 1;
-  return buildPulsePathPoints(located.slice(start, end + 1));
-}
-
 export function isLocated<T extends GeoHop>(
   hop: T,
 ): hop is T & { lat: number; lon: number } {
@@ -245,10 +250,6 @@ export function isLocated<T extends GeoHop>(
     Number.isFinite(hop.lat) &&
     Number.isFinite(hop.lon)
   );
-}
-
-function mappedHopKey(hop: GeoHop & { lat: number; lon: number }): string {
-  return `${hop.ttl}@${hop.lat.toFixed(4)},${hop.lon.toFixed(4)}`;
 }
 
 function latLngVector(lat: number, lng: number): Vector3 {
@@ -285,10 +286,19 @@ function angularDistance(
   a: GlobeLabelCandidate,
   b: GlobeLabelCandidate,
 ): number {
-  const latA = a.lat * (Math.PI / 180);
-  const latB = b.lat * (Math.PI / 180);
+  return greatCircleDegrees(a.lat, a.lng, b.lat, b.lng);
+}
+
+function greatCircleDegrees(
+  startLat: number,
+  startLng: number,
+  endLat: number,
+  endLng: number,
+): number {
+  const latA = startLat * (Math.PI / 180);
+  const latB = endLat * (Math.PI / 180);
   const latDelta = latB - latA;
-  const lngDelta = wrappedLongitudeDelta(a.lng, b.lng) * (Math.PI / 180);
+  const lngDelta = wrappedLongitudeDelta(startLng, endLng) * (Math.PI / 180);
   const haversine =
     Math.sin(latDelta / 2) ** 2 +
     Math.cos(latA) * Math.cos(latB) * Math.sin(lngDelta / 2) ** 2;

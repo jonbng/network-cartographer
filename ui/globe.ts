@@ -1,16 +1,18 @@
 import Globe from "globe.gl";
 import * as THREE from "three";
 import optimerTypeface from "./optimer_regular.typeface.json";
+export { colorForKey } from "./path-color";
 import {
   ambientRouteCandidates,
   ambientMotionAllowed,
-  buildNewHopPulsePath,
+  arcDurationScale,
   buildPulsePathPoints,
   cameraCompensatedScale,
   chooseAmbientRoute,
   classifySegment,
   gapShouldAnimate,
   isLocated,
+  mapLabelColor,
   segmentVisualState,
   selectionAllowsMotion,
   segmentHasVisibleDistance,
@@ -181,6 +183,9 @@ type Point = {
   isOrigin: boolean;
 };
 
+const MARKER_SIZE_MULTIPLIER = 2.75;
+const LINE_WIDTH_MULTIPLIER = 1.1;
+
 type ActivityRing = {
   lat: number;
   lng: number;
@@ -215,6 +220,10 @@ type Arc = {
   missingResponses: number;
   unlocatedHops: number;
   traceStatus: string;
+  revealFromStart: boolean;
+  revealUntil: number | null;
+  settleStartedAt: number | null;
+  durationScale: number;
 };
 
 type PulsePath = {
@@ -224,7 +233,7 @@ type PulsePath = {
   dashLength: number;
   dashGap: number;
   duration: number;
-  tone: "selected" | "ambient" | "reveal";
+  tone: "selected" | "ambient";
 };
 
 type HighlightedHop = { pathId: string; ttl: number };
@@ -257,44 +266,19 @@ let arrivalRing: ActivityRing | null = null;
 let pulseArrivalTimer: ReturnType<typeof setTimeout> | null = null;
 let arrivalClearTimer: ReturnType<typeof setTimeout> | null = null;
 let previousPathHits = new Map<string, number>();
-let previousPathHops = new Map<string, GlobeHop[]>();
-let hasHopBaseline = false;
+let previousSegmentKeys = new Set<string>();
+let hasSegmentBaseline = false;
 const markerObjects = new Set<THREE.Group>();
 let currentLabelPoints: Point[] = [];
 let currentGapLabels: GapLabel[] = [];
+let pointDataCache = new Map<string, Point>();
+let arcDataCache = new Map<string, Arc>();
+let pointerInteractionSuspended = false;
+let arcSpeedTimer: ReturnType<typeof setTimeout> | null = null;
+let arcSpeedFrame: number | null = null;
 
-const PALETTE = [
-  "#e0a86a",
-  "#8fb4a2",
-  "#d5c07a",
-  "#c98c76",
-  "#9caaa2",
-  "#b69ac5",
-  "#d88273",
-  "#82aeb1",
-  "#c4a56d",
-  "#8dae7f",
-  "#87a1bf",
-  "#bd8e9e",
-  "#cf9364",
-  "#789e91",
-];
-
-export function colorForKey(key: string): string {
-  let h = 0;
-  for (let i = 0; i < key.length; i++) {
-    h = (h * 31 + key.charCodeAt(i)) >>> 0;
-  }
-  return PALETTE[h % PALETTE.length];
-}
-
-export function setFocusedApp(app: string | null) {
-  focusedApps = new Set();
-  if (app) focusedApps.add(app);
-  cancelPulse();
-  scheduleAmbientPulse();
-  lastKey = "";
-}
+const INITIAL_ARC_REVEAL_MS = 1800;
+const ARC_SPEED_SETTLE_MS = 720;
 
 export function setFocusedApps(apps: string[]) {
   const next = new Set(apps);
@@ -338,13 +322,8 @@ export function setSelectedPath(
   } else scheduleAmbientPulse();
 }
 
-export function getFocusedApp(): string | null {
-  if (focusedApps.size === 1) return [...focusedApps][0];
-  return null;
-}
-
-export function getFocusedApps(): string[] {
-  return [...focusedApps];
+export function getSelectedPath(): string | null {
+  return selectedPathId;
 }
 
 export function setDensity(mode: "all" | "destinations" | "hubs") {
@@ -424,6 +403,7 @@ export function initGlobe(container: HTMLElement) {
     .arcAltitudeAutoScale(0.26)
     .arcDashLength(arcDashLength)
     .arcDashGap(arcDashGap)
+    .arcDashInitialGap(arcDashInitialGap)
     .arcDashAnimateTime(arcDashAnimateTime)
     .arcLabel((d: object) => segmentTooltip(d as Arc))
     .onArcHover((d: object | null) => {
@@ -492,6 +472,10 @@ export function initGlobe(container: HTMLElement) {
   controls.addEventListener("change", scheduleZoomRefresh);
   controls.addEventListener("end", () => {
     cameraInteracting = false;
+    if (pointerInteractionSuspended) {
+      globe.enablePointerInteraction(true);
+      pointerInteractionSuspended = false;
+    }
     scheduleAmbientPulse();
   });
   container.addEventListener(
@@ -507,7 +491,12 @@ export function initGlobe(container: HTMLElement) {
   container.addEventListener("pointerdown", markMoved);
   document.addEventListener("visibilitychange", () => {
     cancelPulse();
-    if (!document.hidden) scheduleAmbientPulse();
+    if (document.hidden) {
+      globe?.pauseAnimation();
+    } else {
+      globe?.resumeAnimation();
+      scheduleAmbientPulse();
+    }
   });
 
   globe.pointOfView({ lat: 30, lng: -40, altitude: 1.9 }, 0);
@@ -591,7 +580,7 @@ function arcStroke(d: object): number {
   const stroke = isArcEmphasized(arc)
     ? Math.max(0.72, arc.stroke * 1.7)
     : Math.max(arc.dimmed ? 0.28 : 0.46, arc.stroke * 1.5);
-  return stroke * cameraScale;
+  return stroke * LINE_WIDTH_MULTIPLIER * cameraScale;
 }
 
 function arcDashLength(d: object): number {
@@ -604,17 +593,101 @@ function arcDashGap(d: object): number {
   return arc.kind === "unmapped" ? 0.045 : arc.active ? 0.055 : 0.065;
 }
 
+function arcDashInitialGap(d: object): number {
+  return !reduceMotion && (d as Arc).revealFromStart ? 1 : 0;
+}
+
 function arcDashAnimateTime(d: object): number {
   const arc = d as Arc;
   if (reduceMotion) return 0;
-  if (isArcEmphasized(arc)) return 8000;
-  if (arc.active) return 9000;
-  if (arc.kind === "unmapped") return 11000;
-  return arc.dimmed ? 15000 : 12000;
+  const fastDuration = INITIAL_ARC_REVEAL_MS * arc.durationScale;
+  const cruiseDuration = arcCruiseDuration(arc);
+  const now = Date.now();
+  if (arc.revealUntil != null && now < arc.revealUntil) return fastDuration;
+  if (arc.settleStartedAt != null) {
+    const progress = Math.min(1, (now - arc.settleStartedAt) / ARC_SPEED_SETTLE_MS);
+    const eased = progress * progress * (3 - 2 * progress);
+    // Interpolate velocity rather than duration; that is what the renderer
+    // actually advances each frame and avoids a perceptible mid-ramp lurch.
+    const fastStep = 1000 / fastDuration;
+    const cruiseStep = 1000 / cruiseDuration;
+    const step = fastStep + (cruiseStep - fastStep) * eased;
+    return 1000 / step;
+  }
+  return cruiseDuration;
+}
+
+function arcCruiseDuration(arc: Arc): number {
+  const base = isArcEmphasized(arc)
+    ? 4000
+    : arc.active
+      ? 4800
+      : arc.kind === "unmapped"
+        ? 5600
+        : arc.dimmed
+          ? 9000
+          : 6800;
+  return base * arc.durationScale;
+}
+
+function scheduleArcCruiseSpeed(arcs: Arc[]) {
+  if (arcSpeedTimer) clearTimeout(arcSpeedTimer);
+  arcSpeedTimer = null;
+  const now = Date.now();
+  const nextDeadline = arcs.reduce<number | null>((nearest, arc) => {
+    if (arc.revealUntil == null || arc.revealUntil <= now) return nearest;
+    return nearest == null ? arc.revealUntil : Math.min(nearest, arc.revealUntil);
+  }, null);
+  if (nextDeadline == null) return;
+
+  arcSpeedTimer = setTimeout(() => {
+    arcSpeedTimer = null;
+    const startedAt = Date.now();
+    for (const arc of arcDataCache.values()) {
+      if (arc.revealUntil != null && arc.revealUntil <= startedAt) {
+        arc.settleStartedAt = startedAt;
+      }
+    }
+    runArcSpeedSettle();
+    scheduleArcCruiseSpeed([...arcDataCache.values()]);
+  }, Math.max(0, nextDeadline - now));
+}
+
+function runArcSpeedSettle() {
+  if (arcSpeedFrame != null) return;
+  const tick = () => {
+    arcSpeedFrame = null;
+    const now = Date.now();
+    let stillSettling = false;
+    for (const arc of arcDataCache.values()) {
+      if (arc.settleStartedAt == null) continue;
+      if (now - arc.settleStartedAt >= ARC_SPEED_SETTLE_MS) {
+        arc.revealUntil = null;
+        arc.settleStartedAt = null;
+      } else {
+        stillSettling = true;
+      }
+      setArcDashSpeed(arc);
+    }
+    if (stillSettling) arcSpeedFrame = requestAnimationFrame(tick);
+  };
+  arcSpeedFrame = requestAnimationFrame(tick);
+}
+
+function setArcDashSpeed(arc: Arc) {
+  const group = (arc as Arc & {
+    __threeObjArc?: THREE.Group;
+  }).__threeObjArc;
+  const line = group?.children[0] as (THREE.Object3D & {
+    __dashAnimateStep?: number;
+  }) | undefined;
+  if (!line) return;
+  const duration = arcDashAnimateTime(arc);
+  line.__dashAnimateStep = duration > 0 ? 1000 / duration : 0;
 }
 
 function pathStroke(d: object): number {
-  return (d as PulsePath).stroke * 1.45 * cameraScale;
+  return (d as PulsePath).stroke * 1.45 * LINE_WIDTH_MULTIPLIER * cameraScale;
 }
 
 function ringMaxRadius(d: object): number {
@@ -626,6 +699,13 @@ function ringPropagationSpeed(d: object): number {
 }
 
 function scheduleZoomRefresh() {
+  if (cameraInteracting && !pointerInteractionSuspended) {
+    // globe.gl raycasts through every arc and marker several times a second.
+    // There is no useful hover/click target while the camera is moving, so
+    // skip that invisible work until the controls settle.
+    globe?.enablePointerInteraction(false);
+    pointerInteractionSuspended = true;
+  }
   if (zoomRefreshFrame != null) return;
   zoomRefreshFrame = requestAnimationFrame(() => {
     zoomRefreshFrame = null;
@@ -640,11 +720,10 @@ function refreshCameraScale() {
   if (Math.abs(next - cameraScale) < 0.015) return;
   cameraScale = next;
   markerObjects.forEach(updateMarkerScale);
+  pointDataCache.forEach(updatePointHitTargetScale);
   // Re-applying accessors refreshes only the affected Three.js layers. It
   // avoids rebuilding route geometry on every camera frame.
   globe
-    .pointRadius(pointRadius)
-    .pointAltitude(pointAltitude)
     .arcStroke(arcStroke)
     .pathStroke(pathStroke)
     .ringMaxRadius(ringMaxRadius)
@@ -731,8 +810,34 @@ function updateMarkerScale(group: THREE.Group) {
   const point = group.userData.point as Point | undefined;
   if (!point) return;
   const hoverScale = group.userData.hovered === true ? 1.16 : 1;
-  const scale = point.size * 1.72 * cameraScale * hoverScale;
+  const scale = point.size * MARKER_SIZE_MULTIPLIER * cameraScale * hoverScale;
   group.scale.setScalar(scale);
+}
+
+function updatePointHitTargetScale(point: Point) {
+  const mesh = (point as Point & { __threeObjPoint?: THREE.Mesh }).__threeObjPoint;
+  if (!mesh || !globe) return;
+  const globeRadius = Number(globe.getGlobeRadius?.() ?? 100);
+  const pixelsPerDegree = 2 * Math.PI * globeRadius / 360;
+  mesh.scale.x = mesh.scale.y = Math.min(30, pointRadius(point)) * pixelsPerDegree;
+  mesh.scale.z = Math.max(pointAltitude(point) * globeRadius, 0.1);
+}
+
+function disableRaycastTree(root: THREE.Object3D | undefined) {
+  root?.traverse((object) => {
+    object.raycast = () => undefined;
+  });
+}
+
+function disableLabelRaycasts(labels: Array<Point | GapLabel>) {
+  requestAnimationFrame(() => {
+    for (const label of labels) {
+      const object = (label as (Point | GapLabel) & {
+        __threeObjLabel?: THREE.Object3D;
+      }).__threeObjLabel;
+      disableRaycastTree(object);
+    }
+  });
 }
 
 function setMarkerHovered(point: Point | null, hovered: boolean) {
@@ -758,6 +863,66 @@ function markerOpacity(point: Point): number {
   const match = point.color.match(/rgba?\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\)/);
   const sourceAlpha = match ? Number(match[1]) : 1;
   return Math.max(0.42, Math.min(1, sourceAlpha));
+}
+
+function markerVisualKey(point: Point): string {
+  const shape = point.isOrigin
+    ? "origin"
+    : point.isDestination
+      ? "destination"
+      : point.isLastMapped
+        ? "last-mapped"
+        : "hop";
+  return `${shape}|${markerCssColor(point)}|${markerOpacity(point)}`;
+}
+
+function reconcilePointData(points: Point[]): Point[] {
+  const nextCache = new Map<string, Point>();
+  const reconciled = points.map((point) => {
+    const key = locKey(point.lat, point.lng);
+    const previous = pointDataCache.get(key);
+    // Preserve the datum identity that globe.gl uses to retain its Three.js
+    // objects. If a marker's actual visual construction changes, let the
+    // library replace it so the result remains pixel-for-pixel identical.
+    const stable = previous && markerVisualKey(previous) === markerVisualKey(point)
+      ? Object.assign(previous, point)
+      : point;
+    nextCache.set(key, stable);
+    return stable;
+  });
+  pointDataCache = nextCache;
+  return reconciled;
+}
+
+function reconcileArcData(arcs: Arc[]): Arc[] {
+  const nextCache = new Map<string, Arc>();
+  const reconciled = arcs.map((arc) => {
+    const key = arcKey(arc);
+    const previous = arcDataCache.get(key);
+    // Keeping the same datum lets three-globe update the existing mesh. It
+    // then rebuilds tube geometry only when that segment actually changed.
+    // Once a segment starts feeding in, retain its leading-gap state. The
+    // normal dash translation eventually outruns that gap and then continues
+    // forever; resetting it on the next traceroute update would make it pop.
+    const stable = previous
+      ? Object.assign(previous, arc, {
+          revealFromStart: previous.revealFromStart || arc.revealFromStart,
+          revealUntil: previous.revealUntil ?? arc.revealUntil,
+          settleStartedAt: previous.settleStartedAt,
+        })
+      : arc;
+    nextCache.set(key, stable);
+    return stable;
+  });
+  arcDataCache = nextCache;
+  return reconciled;
+}
+
+function pruneMarkerObjectReferences(points: Point[]) {
+  const livePoints = new Set(points);
+  for (const group of markerObjects) {
+    if (!livePoints.has(group.userData.point as Point)) markerObjects.delete(group);
+  }
 }
 
 function opaqueCssColor(color: string): string {
@@ -925,16 +1090,39 @@ function geometryKey(paths: GlobePath[], origin: NetworkOrigin | null): string {
   return s;
 }
 
+function segmentKey(pathId: string, fromTtl: number, toTtl: number): string {
+  return `${pathId}:${fromTtl}-${toTtl}`;
+}
+
+function detectNewSegments(paths: GlobePath[]): Set<string> {
+  const next = new Set<string>();
+  for (const path of paths) {
+    const located = path.hops.filter(isLocated).sort((a, b) => a.ttl - b.ttl);
+    for (let index = 0; index < located.length - 1; index += 1) {
+      const from = located[index];
+      const to = located[index + 1];
+      if (segmentHasVisibleDistance(from.lat, from.lon, to.lat, to.lon)) {
+        next.add(segmentKey(path.id, from.ttl, to.ttl));
+      }
+    }
+  }
+  const added = hasSegmentBaseline
+    ? new Set([...next].filter((key) => !previousSegmentKeys.has(key)))
+    : new Set<string>();
+  previousSegmentKeys = next;
+  hasSegmentBaseline = true;
+  return added;
+}
+
 export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null = null): {
   pathCount: number;
   hopCount: number;
   destCount: number;
 } {
-  const hopReveal = detectNewHopReveal(paths);
+  const newSegmentKeys = detectNewSegments(paths);
   currentPaths = paths;
   const activityPath = detectRouteActivity(paths);
-  if (hopReveal) scheduleHopReveal(hopReveal);
-  else if (activityPath) scheduleActivityPulse(activityPath);
+  if (activityPath) scheduleActivityPulse(activityPath);
   else scheduleAmbientPulse();
   if (!globe) return { pathCount: 0, hopCount: 0, destCount: 0 };
 
@@ -957,7 +1145,7 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
   lastKey = key;
 
   const nodeMap = new Map<string, Point>();
-  const arcs: Arc[] = [];
+  let arcs: Arc[] = [];
   const allLats: number[] = [];
   const allLngs: number[] = [];
 
@@ -1053,7 +1241,7 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
           label: isEnd
             ? labelForDestination(path, h)
             : h.city || "",
-          size: isEnd ? 0.55 : i === 0 ? 0.32 : 0.2,
+          size: isEnd ? 0.55 : i === 0 ? 0.42 : 0.34,
           color: dimmed
             ? "rgba(120,140,160,0.25)"
             : isEnd
@@ -1092,6 +1280,13 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
       const brightColor = bIsTarget
         ? [path.color, "#f9a8d4"]
         : [path.color, lighten(path.color, 0.15)];
+      const isNewSegment = newSegmentKeys.has(segmentKey(path.id, a.ttl, b.ttl));
+      const durationScale = arcDurationScale(
+        a.lat as number,
+        a.lon as number,
+        b.lat as number,
+        b.lon as number,
+      );
       arcs.push({
         startLat: a.lat as number,
         startLng: a.lon as number,
@@ -1121,6 +1316,12 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
         fromTtl: a.ttl,
         toTtl: b.ttl,
         traceStatus: path.status,
+        revealFromStart: isNewSegment,
+        revealUntil: isNewSegment
+          ? Date.now() + INITIAL_ARC_REVEAL_MS * durationScale
+          : null,
+        settleStartedAt: null,
+        durationScale,
         ...segment,
       });
     }
@@ -1211,12 +1412,15 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
     allLngs.push(originPoint.lng);
   }
 
+  points = reconcilePointData(points);
+  arcs = reconcileArcData(arcs);
+
   // Only push new arrays when geometry actually changed (lastKey already gates this)
   globe.pointsData(points);
-  globe.customLayerData([]);
-  disposeMarkerObjects();
+  pruneMarkerObjectReferences(points);
   globe.customLayerData(points);
   globe.arcsData(arcs);
+  scheduleArcCruiseSpeed(arcs);
   originRing = originPoint && !reduceMotion
     ? { lat: originPoint.lat, lng: originPoint.lng, kind: "origin" }
     : null;
@@ -1242,17 +1446,21 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
       .labelTypeFace(optimerTypeface)
       .labelSize(labelSize)
       .labelDotRadius(labelDotRadius)
-      .labelColor((d: object) =>
-        isGapLabel(d)
-          ? "rgba(242,198,109,0.96)"
-          : (d as Point).isOrigin
-          ? "rgba(125,211,199,0.94)"
-          : (d as Point).isDestination
-          ? "rgba(249,168,212,0.84)"
-          : "rgba(226,232,240,0.78)",
-      )
+      .labelColor((d: object) => {
+        if (isGapLabel(d)) return mapLabelColor("gap");
+        const point = d as Point;
+        const kind = point.isOrigin
+          ? "origin"
+          : point.isDestination
+            ? "destination"
+            : "city";
+        return mapLabelColor(kind, point.dimmed);
+      })
       .labelAltitude(labelAltitude)
       .labelResolution(4);
+    // Labels have no hover/click behavior, but globe.gl otherwise includes
+    // their text triangles in every pointer raycast.
+    disableLabelRaycasts(labels);
   } else {
     currentLabelPoints = points;
     currentGapLabels = [];
@@ -1275,7 +1483,7 @@ function labelForDestination(path: GlobePath, hop: GlobeHop): string {
 }
 
 function arcKey(arc: Arc): string {
-  return `${arc.pathId}:${arc.fromTtl}-${arc.toTtl}`;
+  return segmentKey(arc.pathId, arc.fromTtl, arc.toTtl);
 }
 
 function isArcHighlightedByHop(arc: Arc): boolean {
@@ -1450,9 +1658,9 @@ function refreshVisibleLabels() {
   ) {
     return;
   }
-  globe.labelsData(
-    pickLabels(showLabels ? currentLabelPoints : [], currentGapLabels),
-  );
+  const labels = pickLabels(showLabels ? currentLabelPoints : [], currentGapLabels);
+  globe.labelsData(labels);
+  disableLabelRaycasts(labels);
 }
 
 type Vector3 = { x: number; y: number; z: number };
@@ -1526,54 +1734,27 @@ function cancelPulse() {
   globe?.pathsData([]);
 }
 
-function playPathPreview(
-  path: GlobePath,
-  tone: PulsePath["tone"],
-  pointsOverride?: PulsePoint[],
-) {
+function playPathPreview(path: GlobePath, tone: PulsePath["tone"]) {
   pulseTimer = null;
   if (!globe || reduceMotion || document.hidden || cameraInteracting) return;
   if (tone === "selected" && selectedPathId !== path.id) return;
-  const points = pointsOverride ?? buildPulsePathPoints(path.hops);
+  const points = buildPulsePathPoints(path.hops);
   if (points.length < 2) {
     scheduleAmbientPulse();
     return;
   }
   const run = motionRun;
   const selected = tone === "selected";
-  const reveal = tone === "reveal";
-  const duration = reveal ? 900 : selected ? 1250 : 1500;
-  const paths: PulsePath[] = reveal
-    ? [
-        {
-          points,
-          color: withAlpha(path.color, 0.62),
-          stroke: 0.56,
-          dashLength: 0.12,
-          dashGap: 0.88,
-          duration,
-          tone,
-        },
-        {
-          points,
-          color: "#fff4c7",
-          stroke: 0.7,
-          dashLength: 0.026,
-          dashGap: 0.974,
-          duration,
-          tone,
-        },
-      ]
-    : [{
-        points,
-        color: selected ? "#fff0b7" : withAlpha(path.color, 0.55),
-        stroke: selected ? 0.58 : 0.34,
-        dashLength: selected ? 0.026 : 0.02,
-        dashGap: selected ? 0.3 : 0.48,
-        duration,
-        tone,
-      }];
-  globe.pathsData(paths);
+  const duration = selected ? 1250 : 1500;
+  globe.pathsData([{
+    points,
+    color: selected ? "#fff0b7" : withAlpha(path.color, 0.55),
+    stroke: selected ? 0.58 : 0.34,
+    dashLength: selected ? 0.026 : 0.02,
+    dashGap: selected ? 0.3 : 0.48,
+    duration,
+    tone,
+  } satisfies PulsePath]);
   const terminal = points.at(-1);
   if (terminal) {
     pulseArrivalTimer = setTimeout(() => {
@@ -1583,7 +1764,7 @@ function playPathPreview(
         lat: terminal.lat,
         lng: terminal.lng,
         kind: "arrival",
-        color: reveal ? "#fff4c7" : selected ? "#fff0b7" : path.color,
+        color: selected ? "#fff0b7" : path.color,
       };
       setActivityRings();
       arrivalClearTimer = setTimeout(() => {
@@ -1600,46 +1781,6 @@ function playPathPreview(
     pulseClearTimer = null;
     scheduleAmbientPulse();
   }, duration);
-}
-
-type HopReveal = {
-  pathId: string;
-  points: PulsePoint[];
-};
-
-function detectNewHopReveal(paths: GlobePath[]): HopReveal | null {
-  let reveal: HopReveal | null = null;
-  if (hasHopBaseline) {
-    for (const path of paths) {
-      const points = buildNewHopPulsePath(
-        previousPathHops.get(path.id) ?? [],
-        path.hops,
-      );
-      if (points.length >= 2) reveal = { pathId: path.id, points };
-    }
-  }
-  previousPathHops = new Map(
-    paths.map((path) => [path.id, path.hops.map((hop) => ({ ...hop }))]),
-  );
-  hasHopBaseline = true;
-  return reveal;
-}
-
-function scheduleHopReveal(reveal: HopReveal) {
-  if (!globe || !ambientMotionAllowed(reduceMotion, document.hidden, cameraInteracting)) {
-    return;
-  }
-  // Newly mapped geometry is more useful than an ambient pass. Retarget the
-  // packet immediately if another hop arrives while the last one is moving.
-  cancelPulse();
-  const run = motionRun;
-  pulseTimer = setTimeout(() => {
-    if (run !== motionRun) return;
-    pulseTimer = null;
-    const path = currentPaths.find((candidate) => candidate.id === reveal.pathId);
-    if (path) playPathPreview(path, "reveal", reveal.points);
-    else scheduleAmbientPulse();
-  }, 90);
 }
 
 function scheduleAmbientPulse(delay = ambientDelay()) {
@@ -1803,6 +1944,10 @@ function escapeHtml(s: string): string {
 
 export function clearGlobe() {
   cancelPulse();
+  if (arcSpeedTimer) clearTimeout(arcSpeedTimer);
+  arcSpeedTimer = null;
+  if (arcSpeedFrame != null) cancelAnimationFrame(arcSpeedFrame);
+  arcSpeedFrame = null;
   originRing = null;
   arrivalRing = null;
   lastKey = "";
@@ -1812,8 +1957,10 @@ export function clearGlobe() {
   currentLabelPoints = [];
   currentGapLabels = [];
   previousPathHits.clear();
-  previousPathHops.clear();
-  hasHopBaseline = false;
+  previousSegmentKeys.clear();
+  pointDataCache.clear();
+  arcDataCache.clear();
+  hasSegmentBaseline = false;
   hoveredSegmentKey = null;
   highlightedHop = null;
   if (!globe) return;

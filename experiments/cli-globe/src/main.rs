@@ -37,7 +37,7 @@ fn earth_texture_path() -> PathBuf {
     if let Ok(path) = env::var("NETWORK_CARTOGRAPHER_EARTH") {
         return PathBuf::from(path);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/public/earth-dark.jpg")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/earth-dark.jpg")
 }
 
 fn main() -> Result<()> {

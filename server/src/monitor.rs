@@ -292,10 +292,10 @@ impl Monitor {
                     set.insert(ip);
                 }
             }
-            if matches!(&status, TraceStatus::Running { .. } | TraceStatus::Done(_)) {
-                if self.geo.needs_resolve(destination_ip) {
-                    set.insert(destination_ip);
-                }
+            if matches!(&status, TraceStatus::Running { .. } | TraceStatus::Done(_))
+                && self.geo.needs_resolve(destination_ip)
+            {
+                set.insert(destination_ip);
             }
         }
         set.into_iter().collect()

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     convert::Infallible,
     fs,
     net::{IpAddr, SocketAddr},
@@ -305,24 +306,29 @@ async fn static_asset(uri: Uri) -> Response {
     };
 
     if let Some(asset) = WebAssets::get(path) {
-        return asset_response(path, asset.data.into_owned());
+        return asset_response(path, asset.data);
     }
 
     // The frontend currently has no client-side routes, but falling back to
     // the shell keeps direct navigation working if routes are added later.
     if let Some(index) = WebAssets::get("index.html") {
-        return asset_response("index.html", index.data.into_owned());
+        return asset_response("index.html", index.data);
     }
 
     (StatusCode::NOT_FOUND, "UI assets were not embedded").into_response()
 }
 
-fn asset_response(path: &str, bytes: Vec<u8>) -> Response {
+fn asset_response(path: &str, bytes: Cow<'static, [u8]>) -> Response {
     let mime = mime_guess::from_path(path).first_or_octet_stream();
     let cache = if path == "index.html" {
         "no-cache"
     } else {
         "public, max-age=31536000, immutable"
+    };
+
+    let body = match bytes {
+        Cow::Borrowed(bytes) => Body::from(bytes),
+        Cow::Owned(bytes) => Body::from(bytes),
     };
 
     Response::builder()
@@ -335,7 +341,7 @@ fn asset_response(path: &str, bytes: Vec<u8>) -> Response {
             "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; worker-src 'self' blob:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'none'",
         )
         .header("Referrer-Policy", "no-referrer")
-        .body(Body::from(bytes))
+        .body(body)
         .unwrap()
 }
 

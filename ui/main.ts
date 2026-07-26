@@ -6,27 +6,15 @@ import {
   listenToStreamStatus,
   type StreamStatus,
 } from "./api";
-import {
-  clearGlobe,
-  colorForKey,
-  initGlobe,
-  recenterOnData,
-  setDensity,
-  setFocusedApps,
-  setHighlightedHop,
-  setHopClickHandler,
-  setLabelsVisible,
-  setOriginClickHandler,
-  setSegmentClickHandler,
-  setSelectedPath,
-  updateAllPaths,
-  type GlobePath,
-  type GlobeSegmentSelection,
-  type HopSelection,
-  type NetworkOrigin,
+import type {
+  GlobePath,
+  GlobeSegmentSelection,
+  HopSelection,
+  NetworkOrigin,
 } from "./globe";
 import { introStatus, INTRO_LOCK_MS } from "./intro-state";
 import { shouldPresentTransition, transitionCopy } from "./network-transition";
+import { colorForKey } from "./path-color";
 import { RouteInspector } from "./route-inspector";
 import { mergeVisibleSettings } from "./settings-state";
 import { isRenderableTrace } from "./trace-progress";
@@ -237,6 +225,7 @@ let queuedSettings: SettingsDto | null = null;
 let settingsWriteRunning = false;
 let persistedSettings: SettingsDto | null = null;
 let introUnlocked = false;
+let globeApi: typeof import("./globe") | null = null;
 
 const UNATTRIBUTED_NAME = "Unattributed traffic";
 const UNATTRIBUTED_ID = "__unattributed__";
@@ -297,14 +286,14 @@ const el = {
 
 const routeInspector = new RouteInspector(el.inspector, {
   onClose: () => {
-    setSelectedPath(null);
+    globeApi?.setSelectedPath(null);
     paint(true);
   },
   onSelectRoute: (routeId, instant) => {
-    setSelectedPath(routeId, { frame: true, preview: true, instant });
+    globeApi?.setSelectedPath(routeId, { frame: true, preview: true, instant });
     paint(true);
   },
-  onHighlightHop: (hop) => setHighlightedHop(hop),
+  onHighlightHop: (hop) => globeApi?.setHighlightedHop(hop),
   onTraceRoute: async (path) => {
     try {
       await forceTrace(path.ip);
@@ -346,6 +335,10 @@ function finalRtt(hops: HopDto[]): number | null {
 
 function routeId(ownerId: string, dest: DestDto): string {
   return `${ownerId}|${dest.protocol}|${dest.ip}|${dest.port}`;
+}
+
+function destinationKey(dest: DestDto): string {
+  return `${dest.protocol}\u0000${dest.ip}\u0000${dest.port}`;
 }
 
 function pathForDestination(
@@ -409,21 +402,29 @@ function tracePriority(trace: TraceDto): number {
 
 function mergeApplications(apps: AppDto[]): AppDto[] {
   const grouped = new Map<string, AppDto>();
+  const destinationIndexes = new Map<string, Map<string, DestDto>>();
   for (const app of apps) {
     const id = applicationGroupId(app.name);
     const existing = grouped.get(id);
     if (!existing) {
+      const destinations = app.destinations.map((dest) => ({
+        ...dest,
+        processIds: [...(dest.processIds ?? [])],
+      }));
       grouped.set(id, {
         ...app,
         id,
         pids: [...app.pids],
         processes: [...(app.processes ?? [])],
-        destinations: app.destinations.map((dest) => ({
-          ...dest,
-          processIds: [...(dest.processIds ?? [])],
-        })),
+        destinations,
         instanceCount: 1,
       });
+      const index = new Map<string, DestDto>();
+      for (const destination of destinations) {
+        const key = destinationKey(destination);
+        if (!index.has(key)) index.set(key, destination);
+      }
+      destinationIndexes.set(id, index);
       continue;
     }
 
@@ -455,18 +456,17 @@ function mergeApplications(apps: AppDto[]): AppDto[] {
       }
     }
 
+    const destinationIndex = destinationIndexes.get(id)!;
     for (const dest of app.destinations) {
-      const match = existing.destinations.find(
-        (candidate) =>
-          candidate.protocol === dest.protocol &&
-          candidate.ip === dest.ip &&
-          candidate.port === dest.port,
-      );
+      const key = destinationKey(dest);
+      const match = destinationIndex.get(key);
       if (!match) {
-        existing.destinations.push({
+        const destination = {
           ...dest,
           processIds: [...(dest.processIds ?? [])],
-        });
+        };
+        existing.destinations.push(destination);
+        destinationIndex.set(key, destination);
         continue;
       }
       match.hits += dest.hits;
@@ -482,40 +482,44 @@ function mergeApplications(apps: AppDto[]): AppDto[] {
   return [...grouped.values()];
 }
 
-function collectPaths(apps: AppDto[], applyFilter = true): GlobePath[] {
-  if (!snapshot) return [];
-  const paths: GlobePath[] = [];
+function collectPaths(apps: AppDto[]): { allPaths: GlobePath[]; paths: GlobePath[] } {
+  if (!snapshot) return { allPaths: [], paths: [] };
+  const allPaths: GlobePath[] = [];
+  const visiblePathIds = new Set<string>();
   for (const app of apps) {
     for (const dest of app.destinations) {
-      if (applyFilter && !matchesFilter(app.name, dest)) continue;
-      paths.push(
+      const path =
         pathForDestination(
           app.id,
           app.name,
           app.iconUrl ?? null,
           colorForKey(app.id),
           dest,
-        ),
-      );
+        );
+      allPaths.push(path);
+      if (matchesFilter(app.name, dest)) visiblePathIds.add(path.id);
     }
   }
   for (const dest of snapshot.unattributed?.destinations ?? []) {
-    if (applyFilter && !matchesFilter(UNATTRIBUTED_NAME, dest)) continue;
-    paths.push(
+    const path =
       pathForDestination(
         UNATTRIBUTED_ID,
         UNATTRIBUTED_NAME,
         null,
         UNATTRIBUTED_COLOR,
         dest,
-      ),
-    );
+      );
+    allPaths.push(path);
+    if (matchesFilter(UNATTRIBUTED_NAME, dest)) visiblePathIds.add(path.id);
   }
-  paths.sort(
+  allPaths.sort(
     (a, b) =>
       a.app.localeCompare(b.app) || b.hits - a.hits || a.host.localeCompare(b.host),
   );
-  return paths;
+  return {
+    allPaths,
+    paths: allPaths.filter((path) => visiblePathIds.has(path.id)),
+  };
 }
 
 function collectAppGroups(apps: AppDto[], paths: GlobePath[]): AppGroup[] {
@@ -541,40 +545,13 @@ function collectAppGroups(apps: AppDto[], paths: GlobePath[]): AppGroup[] {
       instanceCount: app.instanceCount ?? 1,
     };
     for (const dest of app.destinations) {
-      if (!matchesFilter(app.name, dest)) continue;
-      group.totalDests += 1;
       const id = routeId(app.id, dest);
       const path = byId.get(id);
-      if (path) {
-        group.paths.push(path);
-        if (path.status === "done") group.traced += 1;
-        group.mappedHops += path.hops.filter((h) => h.lat != null).length;
-      } else {
-        group.paths.push({
-          id,
-          appId: app.id,
-          app: app.name,
-          appIconUrl: app.iconUrl ?? null,
-          host: destName(dest),
-          destinationOrg: dest.org,
-          ip: dest.ip,
-          port: dest.port,
-          protocol: dest.protocol,
-          domainSource: dest.domainSource,
-          domainConfidence: dest.domainConfidence,
-          domainAlternativesCount: dest.domainAlternativesCount,
-          hits: dest.hits,
-          color,
-          hops: [],
-          status: dest.trace.status,
-          freshness: dest.trace.freshness ?? "fresh",
-          rttMs: finalRtt(dest.trace.hops),
-          reachedTarget: !!dest.trace.reachedTarget,
-          targetRttMs: dest.trace.targetRttMs ?? null,
-          error: dest.trace.error,
-        });
-        if (dest.trace.status === "done") group.traced += 1;
-      }
+      if (!path) continue;
+      group.totalDests += 1;
+      group.paths.push(path);
+      if (path.status === "done") group.traced += 1;
+      group.mappedHops += path.hops.filter((h) => h.lat != null).length;
     }
     if (group.totalDests > 0) groups.push(group);
   }
@@ -589,22 +566,22 @@ function sidebarSignature(groups: AppGroup[]): string {
   const foc = [...focused].sort().join(",");
   const body = groups
     .map((g) => {
+      // Hits affect destination order, but are not displayed for attributed
+      // routes. Key the rendered order instead of the raw counter so ordinary
+      // traffic does not replace the entire sidebar DOM every second.
       const dests = g.paths
+        .slice()
+        .sort((a, b) => b.hits - a.hits)
         .map(
           (p) =>
-            `${p.host}:${p.port}:${p.hits}:${p.status}:${p.freshness}:${p.domainSource}:${p.domainConfidence}:${p.domainAlternativesCount}:${p.hops.length}:${p.hops.filter((h) => h.lat != null).length}:${p.rttMs == null ? "" : Math.round(p.rttMs)}`,
+            `${p.id}:${p.host}:${p.port}:${p.status}:${p.freshness}:${p.domainSource}:${p.domainConfidence}:${p.domainAlternativesCount}:${p.hops.length}:${p.hops.filter((h) => h.lat != null).length}:${p.rttMs == null ? "" : Math.round(p.rttMs)}`,
         )
         .join(";");
       const processes = g.processes
         .map((process) => `${process.id}:${process.pid}:${process.name}:${process.path ?? ""}`)
         .sort()
         .join(",");
-      const displayedActivity = g.traffic
-        ? `${formatByteRate(g.traffic.rxBytesPerSec)}:${formatByteRate(g.traffic.txBytesPerSec)}`
-        : g.newConnectionsPerSec > 0.05
-          ? g.newConnectionsPerSec.toFixed(1)
-          : "";
-      return `${g.id}|${g.name}|${g.instanceCount}|${g.iconUrl ?? ""}|${g.traced}/${g.totalDests}|${displayedActivity}|${g.currentConnections}|${processes}|${dests}`;
+      return `${g.id}|${g.name}|${g.instanceCount}|${g.iconUrl ?? ""}|${g.traced}/${g.totalDests}|${processes}|${dests}`;
     })
     .join("||");
   const unattributed = snapshot?.unattributed;
@@ -652,26 +629,38 @@ async function pushSettings() {
 
 type HealthState = "ready" | "degraded" | "unavailable" | "waiting";
 
+function setText(element: HTMLElement, text: string): void {
+  if (element.textContent !== text) element.textContent = text;
+}
+
+function setHidden(element: HTMLElement, hidden: boolean): void {
+  if (element.hidden !== hidden) element.hidden = hidden;
+}
+
+function setClassName(element: HTMLElement, className: string): void {
+  if (element.className !== className) element.className = className;
+}
+
 function setHealthValue(element: HTMLElement, text: string, state: HealthState = "ready") {
-  element.textContent = text;
+  setText(element, text);
   element.classList.toggle("degraded", state === "degraded");
   element.classList.toggle("unavailable", state === "unavailable");
 }
 
 function renderCapabilities(): void {
   const trafficRates = snapshot?.capabilities?.trafficRates ?? true;
-  el.trafficSetting.hidden = !trafficRates;
+  setHidden(el.trafficSetting, !trafficRates);
   if (!trafficRates) {
     el.togEnhanced.checked = false;
   } else {
-    el.trafficStatus.textContent = "Native per-app upload and download";
+    setText(el.trafficStatus, "Native per-app upload and download");
   }
 }
 
 function renderHealth(mappedPaths: GlobePath[]): void {
   if (!snapshot) {
-    el.status.textContent = "Starting monitor…";
-    el.healthDot.className = "health-dot waiting";
+    setText(el.status, "Starting monitor…");
+    setClassName(el.healthDot, "health-dot waiting");
     setHealthValue(el.healthOverall, "Starting", "waiting");
     return;
   }
@@ -745,17 +734,17 @@ function renderHealth(mappedPaths: GlobePath[]): void {
     details.push(lastMonitorError);
   }
 
-  el.status.textContent = streamStatus === "reconnecting"
+  setText(el.status, streamStatus === "reconnecting"
     ? "Reconnecting · showing last snapshot"
-    : `Near-live · ${snapshot.appCount} ${snapshot.appCount === 1 ? "app" : "apps"} · ${mappedPaths.length} ${mappedPaths.length === 1 ? "route" : "routes"}`;
-  el.healthDot.className = `health-dot ${overall}`;
+    : `Near-live · ${snapshot.appCount} ${snapshot.appCount === 1 ? "app" : "apps"} · ${mappedPaths.length} ${mappedPaths.length === 1 ? "route" : "routes"}`);
+  setClassName(el.healthDot, `health-dot ${overall}`);
   setHealthValue(
     el.healthOverall,
     overall === "ready" ? "Ready" : overall === "degraded" ? "Limited" : "Unavailable",
     overall,
   );
-  el.healthDetail.hidden = details.length === 0;
-  el.healthDetail.textContent = [...new Set(details)].join(" · ");
+  setHidden(el.healthDetail, details.length === 0);
+  setText(el.healthDetail, [...new Set(details)].join(" · "));
 }
 
 function renderEntryStates(visibleRoutes: number, allRoutes: number): void {
@@ -769,13 +758,13 @@ function renderEntryStates(visibleRoutes: number, allRoutes: number): void {
     failed: snapshot.traceStats.failed,
     mappedRoutes: allRoutes,
   });
-  el.introStatusTitle.textContent = state.title;
-  el.introStatusDetail.textContent = state.detail;
+  setText(el.introStatusTitle, state.title);
+  setText(el.introStatusDetail, state.detail);
 
-  el.mapEmptyState.hidden = visibleRoutes > 0;
+  setHidden(el.mapEmptyState, visibleRoutes > 0);
   if (visibleRoutes === 0) {
-    el.mapEmptyTitle.textContent = state.emptyTitle;
-    el.mapEmptyDetail.textContent = state.emptyDetail;
+    setText(el.mapEmptyTitle, state.emptyTitle);
+    setText(el.mapEmptyDetail, state.emptyDetail);
   }
 }
 
@@ -817,29 +806,32 @@ function paint(forceSidebar = false) {
     pendingSnap = null;
   }
   if (snapshot?.udpMonitoring) {
-    el.udpStatus.textContent = snapshot.udpMonitoring.message;
+    setText(el.udpStatus, snapshot.udpMonitoring.message);
   }
   if (snapshot?.destinationNaming) {
-    el.domainsStatus.textContent = snapshot.destinationNaming.message;
+    setText(el.domainsStatus, snapshot.destinationNaming.message);
   }
 
   const apps = mergeApplications(snapshot?.apps ?? []);
-  const allPaths = collectPaths(apps, false);
+  const { allPaths, paths } = collectPaths(apps);
   const completedMappedPaths = allPaths.filter(
     (p) => p.status === "done" && p.hops.length > 0,
   );
-  const paths = collectPaths(apps, true);
   const mapPaths = paths.filter(isRenderableTrace);
   const groups = collectAppGroups(apps, paths);
   const networkOrigin = snapshot?.networkOrigin ?? null;
-  setFocusedApps([...focused]);
+  globeApi?.setFocusedApps([...focused]);
   routeInspector.update(allPaths, networkOrigin);
   const selectedRoute = routeInspector.selectedRouteId;
-  setSelectedPath(
-    selectedRoute && allPaths.some((path) => path.id === selectedRoute)
-      ? selectedRoute
-      : null,
-  );
+  const nextSelectedRoute = selectedRoute && allPaths.some((path) => path.id === selectedRoute)
+    ? selectedRoute
+    : null;
+  // User actions apply selection directly. Snapshot paints should only sync
+  // it when route availability actually changes; re-applying it invalidates
+  // unchanged globe geometry and cancels the current path animation.
+  if (globeApi && globeApi.getSelectedPath() !== nextSelectedRoute) {
+    globeApi.setSelectedPath(nextSelectedRoute);
+  }
 
   if (snapshot) {
     const t = snapshot.traceStats;
@@ -871,15 +863,15 @@ function paint(forceSidebar = false) {
 
     if (headerSig !== lastHeaderSig) {
       lastHeaderSig = headerSig;
-      el.statApps.textContent = `${apps.length}`;
-      el.btnClearFocus.hidden = focused.size === 0;
+      setText(el.statApps, `${apps.length}`);
+      setHidden(el.btnClearFocus, focused.size === 0);
       const focusedNames = apps
         .filter((app) => focused.has(app.id))
         .map((app) => app.name);
-      el.sidebarSub.textContent =
+      setText(el.sidebarSub,
         focused.size === 0
           ? "Select an app to isolate traffic"
-          : `Isolating ${focusedNames.join(", ")}`;
+          : `Isolating ${focusedNames.join(", ")}`);
       renderNetworkOrigin(networkOrigin);
     }
   }
@@ -888,13 +880,13 @@ function paint(forceSidebar = false) {
   let hopCount = 0;
   let destCount = 0;
   if (globeReady) {
-    const stats = updateAllPaths(mapPaths, networkOrigin);
+    const stats = globeApi!.updateAllPaths(mapPaths, networkOrigin);
     pathCount = stats.pathCount;
     hopCount = stats.hopCount;
     destCount = stats.destCount;
   }
-  el.statPaths.textContent = `${pathCount}`;
-  el.globeStatus.textContent = pathCount > 0
+  setText(el.statPaths, `${pathCount}`);
+  setText(el.globeStatus, pathCount > 0
     ? `${pathCount} paths · ${destCount} destinations · ${hopCount} hops`
     : completedMappedPaths.length > 0
       ? "No mapped routes match this view"
@@ -906,7 +898,7 @@ function paint(forceSidebar = false) {
           ? "Finding destinations · new activity appears after a short delay"
           : snapshot.tracesEnabled
             ? "Mapping routes · traceroutes take a little time"
-            : "Connections detected · route mapping is off";
+            : "Connections detected · route mapping is off");
   renderCapabilities();
   renderHealth(completedMappedPaths);
   renderEntryStates(pathCount, completedMappedPaths.length);
@@ -921,6 +913,7 @@ function paint(forceSidebar = false) {
     el.appList.scrollTop = scrollTop;
     restoreSidebarFocus(activeSidebarControl);
   }
+  updateSidebarMetrics(groups);
 }
 
 function renderNetworkOrigin(origin: NetworkOrigin | null) {
@@ -928,24 +921,25 @@ function renderNetworkOrigin(origin: NetworkOrigin | null) {
   el.networkOrigin.classList.toggle("unavailable", origin?.status === "unavailable");
   const exit = origin?.exit;
   if (!origin || origin.status === "locating") {
-    el.networkOriginPlace.textContent = "Locating…";
-    el.networkOriginAssessment.hidden = false;
-    el.networkOriginAssessment.textContent = "Inspecting route";
+    setText(el.networkOriginPlace, "Locating…");
+    setHidden(el.networkOriginAssessment, false);
+    setText(el.networkOriginAssessment, "Inspecting route");
     return;
   }
-  el.networkOriginAssessment.hidden = origin.assessment === "no_evidence";
+  setHidden(el.networkOriginAssessment, origin.assessment === "no_evidence");
   if (!exit) {
-    el.networkOriginPlace.textContent = "Unavailable";
-    el.networkOriginAssessment.textContent = assessmentText(origin.assessment);
+    setText(el.networkOriginPlace, "Unavailable");
+    setText(el.networkOriginAssessment, assessmentText(origin.assessment));
     return;
   }
-  el.networkOriginPlace.textContent = exit.city
+  setText(el.networkOriginPlace, exit.city
     ? `${exit.city}${exit.country ? `, ${exit.country}` : ""}`
-    : exit.ip || "Location unavailable";
-  el.networkOriginAssessment.textContent = assessmentText(origin.assessment);
-  el.networkOrigin.title = exit.organization
+    : exit.ip || "Location unavailable");
+  setText(el.networkOriginAssessment, assessmentText(origin.assessment));
+  const title = exit.organization
     ? `${exit.organization}${exit.asn ? ` · AS${exit.asn}` : ""}`
     : "Inspect primary network exit";
+  if (el.networkOrigin.title !== title) el.networkOrigin.title = title;
 }
 
 function assessmentText(assessment: NetworkOrigin["assessment"]): string {
@@ -1046,14 +1040,6 @@ function renderSidebar(groups: AppGroup[], apps: AppDto[]) {
       const isOpen = expanded.has(g.id) || focused.has(g.id);
       const isFocused = focused.has(g.id);
       const dim = focused.size > 0 && !isFocused;
-      const act = g.traffic
-        ? `<span class="act"> · ↓${formatByteRate(g.traffic.rxBytesPerSec)} ↑${formatByteRate(g.traffic.txBytesPerSec)}</span>`
-        : g.newConnectionsPerSec > 0.05
-          ? `<span class="act"> · ${g.newConnectionsPerSec.toFixed(1)} new/s</span>`
-          : "";
-      const instances = g.instanceCount > 1
-        ? ` · ${g.instanceCount} instances`
-        : "";
       const processRows = isOpen && g.processes.length
         ? `<div class="process-list" aria-label="Owning processes">${g.processes
             .slice()
@@ -1130,7 +1116,7 @@ function renderSidebar(groups: AppGroup[], apps: AppDto[]) {
           <span class="app-icon-shell" style="--app-color:${g.color}"><span class="app-icon-fallback"></span>${icon}<i></i></span>
           <span class="app-main">
             <span class="app-name">${escapeHtml(g.name)}</span>
-            <span class="app-meta">${g.traced}/${g.totalDests} dests · ${g.currentConnections} current${instances}${act}</span>
+            <span class="app-meta">${appMetaMarkup(g)}</span>
           </span>
           <span class="chev">${isOpen ? "▾" : "▸"}</span>
         </button>
@@ -1147,6 +1133,31 @@ function renderSidebar(groups: AppGroup[], apps: AppDto[]) {
     const nextIcon = card.querySelector<HTMLImageElement>(".app-icon-image");
     const retained = id ? retainedIcons.get(id) : null;
     if (nextIcon && retained && nextIcon.src === retained.src) nextIcon.replaceWith(retained);
+  }
+}
+
+function appMetaMarkup(group: AppGroup): string {
+  const instances = group.instanceCount > 1
+    ? ` · ${group.instanceCount} instances`
+    : "";
+  const activity = group.traffic
+    ? `<span class="act"> · ↓${formatByteRate(group.traffic.rxBytesPerSec)} ↑${formatByteRate(group.traffic.txBytesPerSec)}</span>`
+    : group.newConnectionsPerSec > 0.05
+      ? `<span class="act"> · ${group.newConnectionsPerSec.toFixed(1)} new/s</span>`
+      : "";
+  return `${group.traced}/${group.totalDests} dests · ${group.currentConnections} current${instances}${activity}`;
+}
+
+function updateSidebarMetrics(groups: AppGroup[]): void {
+  const cards = new Map(
+    [...el.appList.querySelectorAll<HTMLElement>("[data-app]")]
+      .map((card) => [card.dataset.app, card] as const),
+  );
+  for (const group of groups) {
+    const meta = cards.get(group.id)?.querySelector<HTMLElement>(".app-row-native .app-meta");
+    if (!meta) continue;
+    const markup = appMetaMarkup(group);
+    if (meta.innerHTML !== markup) meta.innerHTML = markup;
   }
 }
 
@@ -1265,13 +1276,13 @@ function wireUi() {
   el.networkTransition.addEventListener("click", () => {
     if (!snapshot?.networkOrigin) return;
     el.networkTransition.hidden = true;
-    setSelectedPath(null);
+    globeApi?.setSelectedPath(null);
     routeInspector.showOrigin(snapshot.networkOrigin, el.networkTransition);
     paint(true);
   });
   el.networkOrigin.addEventListener("click", () => {
     if (snapshot?.networkOrigin) {
-      setSelectedPath(null);
+      globeApi?.setSelectedPath(null);
       routeInspector.showOrigin(snapshot.networkOrigin, el.networkOrigin);
       paint(true);
     }
@@ -1290,7 +1301,7 @@ function wireUi() {
       "[data-route-id]",
     );
     if (routeButton?.dataset.routeId) {
-      setSelectedPath(routeButton.dataset.routeId, {
+      globeApi?.setSelectedPath(routeButton.dataset.routeId, {
         frame: true,
         preview: true,
         instant: (ev as MouseEvent).detail === 0,
@@ -1341,19 +1352,19 @@ function wireUi() {
   }
 
   el.togLabels.addEventListener("change", () => {
-    setLabelsVisible(el.togLabels.checked);
+    globeApi?.setLabelsVisible(el.togLabels.checked);
     paint(true);
   });
 
   el.selDensity.addEventListener("change", () => {
-    setDensity(el.selDensity.value as "all" | "destinations" | "hubs");
+    globeApi?.setDensity(el.selDensity.value as "all" | "destinations" | "hubs");
     void pushSettings();
     paint(true);
   });
 
   el.btnReset.addEventListener("click", async () => {
     await invoke("reset_monitor");
-    clearGlobe();
+    globeApi?.clearGlobe();
     focused.clear();
     expanded.clear();
     lastSidebarSig = "";
@@ -1363,7 +1374,7 @@ function wireUi() {
   });
 
   el.btnRecenter.addEventListener("click", () => {
-    recenterOnData();
+    globeApi?.recenterOnData();
     paint(true);
     showToast("Camera recentered on active paths");
   });
@@ -1436,25 +1447,26 @@ async function boot() {
   void loadVersion();
 
   try {
-    initGlobe(el.globe);
-    setHopClickHandler((selection: HopSelection) => {
+    globeApi = await import("./globe");
+    globeApi.initGlobe(el.globe);
+    globeApi.setHopClickHandler((selection: HopSelection) => {
       const routeIds = [...new Set(selection.routes.map((route) => route.pathId))];
       if (routeIds.length === 1) {
-        setSelectedPath(routeIds[0], { frame: true, preview: true });
+        globeApi?.setSelectedPath(routeIds[0], { frame: true, preview: true });
         routeInspector.showRoute(routeIds[0]);
       } else {
-        setSelectedPath(null);
+        globeApi?.setSelectedPath(null);
         routeInspector.showNode(selection);
       }
       paint(true);
     });
-    setSegmentClickHandler((segment: GlobeSegmentSelection) => {
-      setSelectedPath(segment.pathId, { frame: true, preview: true });
+    globeApi.setSegmentClickHandler((segment: GlobeSegmentSelection) => {
+      globeApi?.setSelectedPath(segment.pathId, { frame: true, preview: true });
       routeInspector.showRoute(segment.pathId, null, segment);
       paint(true);
     });
-    setOriginClickHandler((origin: NetworkOrigin) => {
-      setSelectedPath(null);
+    globeApi.setOriginClickHandler((origin: NetworkOrigin) => {
+      globeApi?.setSelectedPath(null);
       routeInspector.showOrigin(origin);
       paint(true);
     });
@@ -1473,7 +1485,7 @@ async function boot() {
     el.togLocalGeo.checked = !!settings.geoLocalOnly;
     if (settings.globeDensity) {
       el.selDensity.value = settings.globeDensity;
-      setDensity(settings.globeDensity as "all" | "destinations" | "hubs");
+      globeApi?.setDensity(settings.globeDensity as "all" | "destinations" | "hubs");
     }
   } catch {
     /* preview */
