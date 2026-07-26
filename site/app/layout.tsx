@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import { IBM_Plex_Mono } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 
 const mono = IBM_Plex_Mono({
@@ -39,7 +40,10 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
     <html lang="en" className={mono.variable}>
-      <body className={mono.className}>{children}</body>
+      <body className={mono.className}>
+        {children}
+        <Analytics />
+      </body>
     </html>
   );
 }
