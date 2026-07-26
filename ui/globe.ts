@@ -18,11 +18,15 @@ export type GlobeHop = {
 
 export type GlobePath = {
   id: string;
+  appId: string;
   app: string;
   host: string;
   ip: string;
   port: number;
   protocol: string;
+  domainSource?: string;
+  domainConfidence?: "exact" | "high" | "low" | "none";
+  domainAlternativesCount?: number;
   hits: number;
   color: string;
   hops: GlobeHop[];
@@ -31,6 +35,35 @@ export type GlobePath = {
   reachedTarget: boolean;
   targetRttMs: number | null;
   error?: string | null;
+};
+
+export type NetworkOrigin = {
+  status: "locating" | "ready" | "unavailable";
+  exit: NetworkExit | null;
+  assessment:
+    | "proxy_configured"
+    | "tunnel_likely"
+    | "proxy_and_tunnel"
+    | "no_evidence"
+    | "unknown";
+  evidence: Array<{
+    kind: "default_interface" | "system_proxy" | "environment_proxy";
+    strength: "strong" | "supporting";
+    label: string;
+  }>;
+};
+
+export type NetworkExit = {
+  ip: string | null;
+  city: string | null;
+  country: string | null;
+  lat: number | null;
+  lon: number | null;
+  asn: number | null;
+  organization: string | null;
+  source: "hosted-egress" | "trace-fallback";
+  confidence: number | null;
+  ageSeconds: number;
 };
 
 export type HopRouteChoice = {
@@ -92,7 +125,10 @@ type Point = {
   geoSource: string | null;
   geoConfidence: number | null;
   geoNote: string | null;
+  isOrigin: boolean;
 };
+
+type OriginRing = { lat: number; lng: number };
 
 type Arc = {
   startLat: number;
@@ -118,6 +154,7 @@ let density: "all" | "destinations" | "hubs" = "all";
 let hasUserMovedCamera = false;
 let lastFrameBounds: string | null = null;
 let onHopClick: ((selection: HopSelection) => void) | null = null;
+let onOriginClick: ((origin: NetworkOrigin) => void) | null = null;
 
 const PALETTE = [
   "#e0a86a",
@@ -188,6 +225,12 @@ export function setHopClickHandler(
   onHopClick = fn;
 }
 
+export function setOriginClickHandler(
+  fn: ((origin: NetworkOrigin) => void) | null,
+) {
+  onOriginClick = fn;
+}
+
 export function initGlobe(container: HTMLElement) {
   if (globe) return globe;
 
@@ -200,13 +243,19 @@ export function initGlobe(container: HTMLElement) {
     .atmosphereColor("#e0a86a")
     .atmosphereAltitude(0.2)
     .globeImageUrl("/earth-dark.jpg")
-    .pointAltitude((d: object) => ((d as Point).isDestination ? 0.018 : 0.008))
+    .pointAltitude((d: object) =>
+      (d as Point).isOrigin ? 0.028 : (d as Point).isDestination ? 0.018 : 0.008,
+    )
     .pointRadius("size")
     .pointColor("color")
     .pointsMerge(false)
     .pointLabel((d: object) => hopTooltip(d as Point))
     .onPointClick((d: object) => {
       const p = d as Point;
+      if (p.isOrigin) {
+        if (currentOrigin) onOriginClick?.(currentOrigin);
+        return;
+      }
       const routes = [...new Map(p.through.map((route) => [route.pathId, route])).values()];
       onHopClick?.({
         lat: p.lat,
@@ -235,7 +284,13 @@ export function initGlobe(container: HTMLElement) {
     .arcDashAnimateTime((d: object) => ((d as Arc).uncertain ? 2800 : 0))
     .arcsTransitionDuration(0)
     .pointsTransitionDuration(0)
-    .labelsTransitionDuration(0);
+    .labelsTransitionDuration(0)
+    .ringLat("lat")
+    .ringLng("lng")
+    .ringColor(() => (time: number) => `rgba(94,234,212,${Math.max(0, 0.42 - time * 0.34)})`)
+    .ringMaxRadius(3.2)
+    .ringPropagationSpeed(1.25)
+    .ringRepeatPeriod(1800);
 
   const controls = globe.controls();
   controls.autoRotate = false;
@@ -319,6 +374,7 @@ export function recenterOnData() {
 }
 
 function hopTooltip(p: Point): string {
+  if (p.isOrigin) return originTooltip(currentOrigin);
   const city = p.city
     ? `${p.city}${p.country ? ", " + p.country : ""}`
     : "Unknown location";
@@ -387,6 +443,24 @@ function hopTooltip(p: Point): string {
   </div>`;
 }
 
+function originTooltip(origin: NetworkOrigin | null): string {
+  if (!origin?.exit) return "Primary network exit";
+  const exit = origin.exit;
+  const place = exit.city
+    ? `${exit.city}${exit.country ? `, ${exit.country}` : ""}`
+    : "Location unavailable";
+  const network = exit.organization
+    ? `${exit.organization}${exit.asn ? ` · AS${exit.asn}` : ""}`
+    : "Network provider unavailable";
+  return `<div style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.45;padding:5px 3px;max-width:280px">
+    <div style="color:#7dd3c7;font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:10px">Primary network exit</div>
+    <div style="margin-top:5px;font-weight:650">${escapeHtml(place)}</div>
+    <div style="opacity:.78;margin-top:2px">${escapeHtml(network)}</div>
+    ${exit.ip ? `<div style="opacity:.62;margin-top:2px">${escapeHtml(exit.ip)}</div>` : ""}
+    <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.12);opacity:.68;font-size:11px">Where the public internet sees this connection · click for evidence</div>
+  </div>`;
+}
+
 /** Short readable host for UI — drop PTR junk and ultra-long labels. */
 export function prettyHost(host: string): string {
   let h = host.trim();
@@ -406,9 +480,12 @@ export function prettyHost(host: string): string {
   return h;
 }
 
-function geometryKey(paths: GlobePath[]): string {
+let currentOrigin: NetworkOrigin | null = null;
+
+function geometryKey(paths: GlobePath[], origin: NetworkOrigin | null): string {
   const focus = [...focusedApps].sort().join(",");
-  let s = `${showLabels ? 1 : 0}|${focus}|${selectedPathId ?? ""}|${density}|`;
+  const exit = origin?.exit;
+  let s = `${showLabels ? 1 : 0}|${focus}|${selectedPathId ?? ""}|${density}|${origin?.status ?? ""}:${origin?.assessment ?? ""}:${exit?.lat ?? ""},${exit?.lon ?? ""}:${exit?.city ?? ""}|`;
   for (const p of paths) {
     s += `${p.id}:${p.reachedTarget ? 1 : 0}`;
     for (const h of p.hops) {
@@ -422,7 +499,7 @@ function geometryKey(paths: GlobePath[]): string {
   return s;
 }
 
-export function updateAllPaths(paths: GlobePath[]): {
+export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null = null): {
   pathCount: number;
   hopCount: number;
   destCount: number;
@@ -440,7 +517,8 @@ export function updateAllPaths(paths: GlobePath[]): {
     }
   }
 
-  const key = geometryKey(paths);
+  currentOrigin = origin;
+  const key = geometryKey(paths, origin);
   if (key === lastKey) {
     return { pathCount, hopCount, destCount };
   }
@@ -454,7 +532,7 @@ export function updateAllPaths(paths: GlobePath[]): {
   for (const path of paths) {
     const dimmed = selectedPathId
       ? path.id !== selectedPathId
-      : focusedApps.size > 0 && !focusedApps.has(path.app);
+      : focusedApps.size > 0 && !focusedApps.has(path.appId);
     const located = path.hops.filter(
       (h) =>
         h.lat != null &&
@@ -561,6 +639,7 @@ export function updateAllPaths(paths: GlobePath[]): {
           geoSource: h.geoSource ?? null,
           geoConfidence: h.geoConfidence ?? null,
           geoNote: h.geoNote ?? null,
+          isOrigin: false,
         });
       }
     });
@@ -626,9 +705,46 @@ export function updateAllPaths(paths: GlobePath[]): {
     );
   }
 
+  const originExit = origin?.status === "ready" ? origin.exit : null;
+  const hasOriginCoordinates =
+    originExit?.lat != null &&
+    originExit.lon != null &&
+    Number.isFinite(originExit.lat) &&
+    Number.isFinite(originExit.lon);
+  let originPoint: Point | null = null;
+  if (hasOriginCoordinates && originExit) {
+    originPoint = {
+      lat: originExit.lat as number,
+      lng: originExit.lon as number,
+      label: "Primary network exit",
+      size: 0.62,
+      color: "#7dd3c7",
+      isDestination: false,
+      isLastMapped: false,
+      city: originExit.city,
+      country: originExit.country,
+      addr: originExit.ip,
+      hostname: null,
+      through: [],
+      dimmed: false,
+      asn: originExit.asn,
+      org: originExit.organization,
+      geoSource: originExit.source,
+      geoConfidence: originExit.confidence,
+      geoNote: null,
+      isOrigin: true,
+    };
+    points.push(originPoint);
+    allLats.push(originPoint.lat);
+    allLngs.push(originPoint.lng);
+  }
+
   // Only push new arrays when geometry actually changed (lastKey already gates this)
   globe.pointsData(points);
   globe.arcsData(arcs);
+  globe.ringsData(
+    originPoint ? ([{ lat: originPoint.lat, lng: originPoint.lng }] satisfies OriginRing[]) : [],
+  );
 
   if (showLabels && points.length > 0) {
     const labels = pickLabels(points);
@@ -640,10 +756,14 @@ export function updateAllPaths(paths: GlobePath[]): {
       // Globe labels use angular units, so values around 1 become enormous
       // when the camera frames a dense metro area. Keep them secondary to
       // the nodes and routes they describe.
-      .labelSize((d: object) => ((d as Point).isDestination ? 0.48 : 0.34))
+      .labelSize((d: object) =>
+        (d as Point).isOrigin ? 0.44 : (d as Point).isDestination ? 0.48 : 0.34,
+      )
       .labelDotRadius(0)
       .labelColor((d: object) =>
-        (d as Point).isDestination
+        (d as Point).isOrigin
+          ? "rgba(125,211,199,0.94)"
+          : (d as Point).isDestination
           ? "rgba(249,168,212,0.84)"
           : "rgba(226,232,240,0.58)",
       )
@@ -724,7 +844,11 @@ function pickLabels(points: Point[]): Point[] {
   for (const point of points) {
     if (point.dimmed) continue;
 
-    const label = point.isDestination ? point.label : point.city || "";
+    const label = point.isOrigin
+      ? point.label
+      : point.isDestination
+        ? point.label
+        : point.city || "";
     if (!label || isNoisyLabel(label)) continue;
 
     const candidate = label === point.label ? point : { ...point, label };
@@ -761,7 +885,7 @@ function labelPriority(point: Point): number {
   // Destinations win, then shared network hubs, then route volume. Prefer a
   // concise name in a tie because it occupies less map space.
   return (
-    (point.isDestination ? 10_000 : 0) +
+    (point.isOrigin ? 20_000 : point.isDestination ? 10_000 : 0) +
     destinationRoutes * 100 +
     appCount * 20 +
     point.through.length -
@@ -862,4 +986,5 @@ export function clearGlobe() {
   globe.pointsData([]);
   globe.arcsData([]);
   globe.labelsData([]);
+  globe.ringsData([]);
 }

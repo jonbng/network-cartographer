@@ -11,6 +11,7 @@ use crate::dto::PathChangedEvent;
 use crate::dto::{build_snapshot, SettingsDto, SnapshotContext, SnapshotDto};
 use crate::geo::{pending_ips, AsnDb, GeoCache, PathGeoCache};
 use crate::model::{display_name_for, AppState};
+use crate::network_origin::NetworkOrigin;
 use crate::resolve::HostnameCache;
 use crate::settings_store;
 use crate::trace::{TraceConfig, TraceEngine, TraceStatus};
@@ -27,11 +28,28 @@ pub struct Monitor {
     pub asn: AsnDb,
     pub settings: Mutex<SettingsDto>,
     pub destination_names: DestinationNameCache,
+    pub network_origin: NetworkOrigin,
     dns_collector: Mutex<OsDnsCollector>,
     /// Previous hop fingerprint per "app|ip"
     path_fps: Mutex<HashMap<String, u64>>,
     /// Keys that changed this cycle
     pub path_changed: Mutex<HashSet<String>>,
+    capture_runtime: Mutex<CaptureRuntime>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CaptureRuntime {
+    phase: &'static str,
+    effective_interval_ms: u64,
+}
+
+impl Default for CaptureRuntime {
+    fn default() -> Self {
+        Self {
+            phase: "active",
+            effective_interval_ms: 0,
+        }
+    }
 }
 
 impl Monitor {
@@ -57,19 +75,16 @@ impl Monitor {
             asn: AsnDb::new(),
             settings: Mutex::new(settings),
             destination_names: DestinationNameCache::new(),
+            network_origin: NetworkOrigin::new(),
             dns_collector: Mutex::new(OsDnsCollector::default()),
             path_fps: Mutex::new(HashMap::new()),
             path_changed: Mutex::new(HashSet::new()),
+            capture_runtime: Mutex::new(CaptureRuntime::default()),
         }
     }
 
     pub fn tick(&self) -> Result<SnapshotDto, String> {
         let settings = self.settings.lock().clone();
-        // The first-run notice promises that monitoring and external lookups do
-        // not start until the user accepts it.
-        if !settings.privacy_accepted {
-            return Ok(self.snapshot());
-        }
         {
             let mut state = self.state.lock();
             state.external_only = settings.external_only;
@@ -117,10 +132,14 @@ impl Monitor {
         let settings = self.settings.lock().clone();
         let collector = self.collector.lock();
         let traffic_status = collector.traffic_status();
-        let collection_status = collector.collection_status();
+        let mut collection_status = collector.collection_status();
         let udp_status = collector.udp_status();
         drop(collector);
+        let capture_runtime = *self.capture_runtime.lock();
+        collection_status.poll_phase = capture_runtime.phase;
+        collection_status.effective_poll_interval_ms = capture_runtime.effective_interval_ms;
         let changed = self.path_changed.lock().clone();
+        let network_origin = self.network_origin.view(!settings.geo_local_only);
         build_snapshot(
             &state,
             &SnapshotContext {
@@ -134,6 +153,7 @@ impl Monitor {
                 collection_status: &collection_status,
                 destination_naming: &destination_naming,
                 udp_status: &udp_status,
+                network_origin: &network_origin,
             },
         )
     }
@@ -142,9 +162,20 @@ impl Monitor {
         self.collector.lock().events_pending()
     }
 
+    pub fn take_collection_changed(&self) -> bool {
+        self.collector.lock().take_topology_changed()
+    }
+
+    pub fn set_capture_runtime(&self, phase: &'static str, effective_interval_ms: u64) {
+        *self.capture_runtime.lock() = CaptureRuntime {
+            phase,
+            effective_interval_ms,
+        };
+    }
+
     pub fn poll_domain_sources(&self) {
         let settings = self.settings.lock().clone();
-        if settings.privacy_accepted && settings.identify_domains {
+        if settings.identify_domains {
             self.dns_collector.lock().poll(&self.destination_names);
         }
     }
@@ -168,7 +199,8 @@ impl Monitor {
     }
 
     pub fn apply_settings(&self, mut settings: SettingsDto) {
-        settings.settings_version = 2;
+        settings.settings_version = 3;
+        settings.privacy_accepted = true;
         let (traces_changed, domains_disabled) = {
             let mut current = self.settings.lock();
             let changed = current.traces_enabled != settings.traces_enabled;
@@ -234,10 +266,9 @@ impl Monitor {
         changed.clear();
 
         for app in state.sorted_apps() {
-            let app_name = display_name_for(app);
             for dest in app.destinations.values() {
                 if let TraceStatus::Done(r) = traces.get(dest.remote.ip()) {
-                    let key = format!("{}|{}", app_name, dest.remote.ip());
+                    let key = format!("{}|{}", app.id, dest.remote.ip());
                     let fp = hop_fingerprint(&r.hops);
                     if let Some(prev) = fps.get(&key) {
                         if *prev != fp && fp != 0 {
@@ -253,17 +284,19 @@ impl Monitor {
     pub fn drain_path_change_events(&self) -> Vec<PathChangedEvent> {
         let changed = self.path_changed.lock().clone();
         let state = self.state.lock();
+        let apps = state.sorted_apps();
         let mut out = Vec::new();
         for key in changed {
             let mut parts = key.splitn(2, '|');
-            let app = parts.next().unwrap_or("?").to_string();
+            let app_id = parts.next().unwrap_or("?");
             let ip = parts.next().unwrap_or("?").to_string();
-            let host = state
-                .sorted_apps()
-                .iter()
-                .find(|a| display_name_for(a) == app)
-                .and_then(|a| {
-                    a.destinations
+            let matched_app = apps.iter().find(|app| app.id == app_id);
+            let app = matched_app
+                .map(|app| display_name_for(app))
+                .unwrap_or_else(|| app_id.to_string());
+            let host = matched_app
+                .and_then(|app| {
+                    app.destinations
                         .values()
                         .find(|d| d.remote.ip().to_string() == ip)
                         .map(|d| d.display_host())

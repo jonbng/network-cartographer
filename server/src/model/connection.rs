@@ -9,6 +9,25 @@ pub enum DestinationNameSource {
     OsDns,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DomainConfidence {
+    None,
+    Low,
+    High,
+    Exact,
+}
+
+impl DomainConfidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::High => "high",
+            Self::Exact => "exact",
+        }
+    }
+}
+
 impl DestinationNameSource {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -31,6 +50,8 @@ pub struct DestinationName {
     pub source: DestinationNameSource,
     pub observed_at: Instant,
     pub expires_at: Instant,
+    pub confidence: DomainConfidence,
+    pub alternatives_count: usize,
 }
 
 impl DestinationName {
@@ -130,6 +151,8 @@ pub struct Connection {
     pub unattributed_reason: Option<UnattributedReason>,
     /// True only on the first snapshot in which this exact socket exists.
     pub is_new: bool,
+    /// First time this exact socket tuple was observed in its current lifetime.
+    pub first_observed_at: Instant,
     pub traffic_counters: Option<SocketTrafficCounters>,
     /// Best local domain evidence matched to this connection.
     pub destination_name: Option<DestinationName>,

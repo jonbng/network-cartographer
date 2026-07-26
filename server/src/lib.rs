@@ -4,6 +4,7 @@ mod geo;
 mod history;
 mod model;
 mod monitor;
+mod network_origin;
 mod resolve;
 mod server;
 mod settings_store;
@@ -18,8 +19,9 @@ pub mod standalone {
 
     pub use crate::dto::{
         AppDto, AttributionStatsDto, CollectionDto, DestDto, DestinationNamingDto, HopDto,
-        MonitoringDto, ProcessDto, SettingsDto, SnapshotDto, TraceDto, TraceStatsDto,
-        TrafficGroupDto, TrafficRateDto, UdpMonitoringDto,
+        MonitoringDto, NetworkExitDto, NetworkOriginDto, NetworkOriginEvidenceDto, ProcessDto,
+        SettingsDto, SnapshotDto, TraceDto, TraceStatsDto, TrafficGroupDto, TrafficRateDto,
+        UdpMonitoringDto,
     };
 
     use crate::monitor::Monitor;
@@ -77,9 +79,6 @@ pub mod standalone {
         /// block on the network.
         pub fn warm_geo_once(&self, limit: usize) -> usize {
             let settings = self.settings();
-            if !settings.privacy_accepted {
-                return 0;
-            }
             let pending = self.inner.pending_geo_ips();
             let batch: Vec<IpAddr> = pending.into_iter().take(limit.max(1)).collect();
             if batch.is_empty() {

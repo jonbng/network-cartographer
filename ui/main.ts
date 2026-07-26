@@ -8,10 +8,12 @@ import {
   setFocusedApps,
   setHopClickHandler,
   setLabelsVisible,
+  setOriginClickHandler,
   setSelectedPath,
   updateAllPaths,
   type GlobePath,
   type HopSelection,
+  type NetworkOrigin,
 } from "./globe";
 import { mountOnboarding } from "./onboarding";
 import { RouteInspector } from "./route-inspector";
@@ -52,6 +54,8 @@ type DestDto = {
   sni?: string | null;
   domain?: string | null;
   domainSource?: "tls-sni" | "os-dns" | "reverse-dns" | "ip";
+  domainConfidence?: "exact" | "high" | "low" | "none";
+  domainAlternativesCount?: number;
   processIds?: string[];
   asn?: number | null;
   org?: string | null;
@@ -70,7 +74,7 @@ type ProcessDto = {
 };
 
 type AppDto = {
-  id?: string;
+  id: string;
   name: string;
   path?: string | null;
   pids: number[];
@@ -149,6 +153,14 @@ type SnapshotDto = {
     message: string;
     udpRemote?: boolean;
     accessLimited?: number;
+    pollPhase?: "active" | "warm" | "idle";
+    effectivePollIntervalMs?: number;
+    observedOpens?: number;
+    observedCloses?: number;
+    recoveredOwners?: number;
+    unattributedOwnerGone?: number;
+    unattributedAmbiguous?: number;
+    unattributedAccessLimited?: number;
   };
   destinationNaming?: {
     enabled: boolean;
@@ -164,9 +176,11 @@ type SnapshotDto = {
   geoMmdb?: boolean;
   geoAsnMmdb?: boolean;
   settings?: SettingsDto;
+  networkOrigin?: NetworkOrigin;
 };
 
 type AppGroup = {
+  id: string;
   name: string;
   color: string;
   paths: GlobePath[];
@@ -185,9 +199,6 @@ let filter = "";
 let globeReady = false;
 const expanded = new Set<string>();
 const focused = new Set<string>();
-/** Last known privacyAccepted so set_settings does not reset it. */
-let privacyAccepted = false;
-
 let pendingSnap: SnapshotDto | null = null;
 let paintScheduled = false;
 let lastPaintAt = 0;
@@ -202,6 +213,13 @@ const UNATTRIBUTED_COLOR = "#8a8680";
 const el = {
   globe: document.getElementById("globe")!,
   globeStatus: document.getElementById("globe-status")!,
+  networkOrigin: document.getElementById("network-origin") as HTMLButtonElement,
+  networkOriginPlace: document.getElementById("network-origin-place")!,
+  networkOriginAssessment: document.getElementById("network-origin-assessment")!,
+  traceProgress: document.getElementById("trace-progress")!,
+  traceProgressTitle: document.getElementById("trace-progress-title")!,
+  traceProgressDetail: document.getElementById("trace-progress-detail")!,
+  traceProgressCount: document.getElementById("trace-progress-count")!,
   appList: document.getElementById("app-list")!,
   sidebarSub: document.getElementById("sidebar-sub")!,
   btnClearFocus: document.getElementById("btn-clear-focus") as HTMLButtonElement,
@@ -225,6 +243,7 @@ const el = {
   selDensity: document.getElementById("sel-density") as HTMLSelectElement,
   btnReset: document.getElementById("btn-reset")!,
   btnTraceAll: document.getElementById("btn-trace-all")!,
+  traceAllLabel: document.getElementById("trace-all-label")!,
   btnRecenter: document.getElementById("btn-recenter")!,
   toast: document.getElementById("toast")!,
   onboardingHost: document.getElementById("onboarding-host")!,
@@ -287,11 +306,15 @@ function pathForDestination(
 ): GlobePath {
   return {
     id: routeId(ownerId, dest),
+    appId: ownerId,
     app: ownerName,
     host: destName(dest),
     ip: dest.ip,
     port: dest.port,
     protocol: dest.protocol,
+    domainSource: dest.domainSource,
+    domainConfidence: dest.domainConfidence,
+    domainAlternativesCount: dest.domainAlternativesCount,
     hits: dest.hits,
     color,
     hops: dest.trace.hops.map((h) => ({
@@ -325,9 +348,9 @@ function collectPaths(applyFilter = true): GlobePath[] {
       if (applyFilter && !matchesFilter(app.name, dest)) continue;
       paths.push(
         pathForDestination(
-          app.id || app.name,
+          app.id,
           app.name,
-          colorForKey(app.name),
+          colorForKey(app.id),
           dest,
         ),
       );
@@ -356,8 +379,9 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
   const byId = new Map(paths.map((p) => [p.id, p]));
   const groups: AppGroup[] = [];
   for (const app of snapshot.apps) {
-    const color = colorForKey(app.name);
+    const color = colorForKey(app.id);
     const group: AppGroup = {
+      id: app.id,
       name: app.name,
       color,
       paths: [],
@@ -373,7 +397,7 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
     for (const dest of app.destinations) {
       if (!matchesFilter(app.name, dest)) continue;
       group.totalDests += 1;
-      const id = routeId(app.id || app.name, dest);
+      const id = routeId(app.id, dest);
       const path = byId.get(id);
       if (path) {
         group.paths.push(path);
@@ -382,11 +406,15 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
       } else {
         group.paths.push({
           id,
+          appId: app.id,
           app: app.name,
           host: destName(dest),
           ip: dest.ip,
           port: dest.port,
           protocol: dest.protocol,
+          domainSource: dest.domainSource,
+          domainConfidence: dest.domainConfidence,
+          domainAlternativesCount: dest.domainAlternativesCount,
           hits: dest.hits,
           color,
           hops: [],
@@ -415,11 +443,11 @@ function sidebarSignature(groups: AppGroup[]): string {
       const dests = g.paths
         .map(
           (p) =>
-            `${p.host}:${p.port}:${p.status}:${p.hops.filter((h) => h.lat != null).length}`,
+            `${p.host}:${p.port}:${p.status}:${p.domainSource}:${p.domainConfidence}:${p.domainAlternativesCount}:${p.hops.filter((h) => h.lat != null).length}`,
         )
         .join(";");
       const processes = g.processes.map((process) => process.id).sort().join(",");
-      return `${g.name}|${g.traced}/${g.totalDests}|${g.activity.toFixed(1)}|${g.currentConnections}|${processes}|${dests}`;
+      return `${g.id}|${g.name}|${g.traced}/${g.totalDests}|${g.activity.toFixed(1)}|${g.currentConnections}|${processes}|${dests}`;
     })
     .join("||");
   const unattributed = snapshot?.unattributed;
@@ -428,7 +456,7 @@ function sidebarSignature(groups: AppGroup[]): string {
 
 function currentSettings(): SettingsDto {
   return {
-    settingsVersion: 2,
+    settingsVersion: 3,
     externalOnly: el.togExternal.checked,
     includeUdp: el.togUdp.checked,
     tracesEnabled: el.togTraces.checked,
@@ -440,7 +468,7 @@ function currentSettings(): SettingsDto {
     identifyDomains: el.togDomains.checked,
     historyEnabled: el.togHistory.checked,
     enhancedMonitoring: el.togEnhanced.checked,
-    privacyAccepted,
+    privacyAccepted: true,
   };
 }
 
@@ -470,8 +498,9 @@ function paint(forceSidebar = false) {
   const paths = collectPaths(true);
   const mapPaths = paths.filter((p) => p.status === "done" && p.hops.length > 0);
   const groups = collectAppGroups(paths);
+  const networkOrigin = snapshot?.networkOrigin ?? null;
   setFocusedApps([...focused]);
-  routeInspector.update(allPaths);
+  routeInspector.update(allPaths, networkOrigin);
   const selectedRoute = routeInspector.selectedRouteId;
   setSelectedPath(
     selectedRoute && allPaths.some((path) => path.id === selectedRoute)
@@ -487,11 +516,22 @@ function paint(forceSidebar = false) {
       t.queued,
       t.running,
       t.done,
+      t.failed,
+      snapshot.tracesEnabled,
       mapPaths.length,
       snapshot.geoBackend,
       snapshot.monitoring?.status,
       snapshot.collection?.status,
       snapshot.collection?.droppedEvents,
+      networkOrigin?.status,
+      networkOrigin?.assessment,
+      networkOrigin?.exit?.ip,
+      networkOrigin?.exit?.city,
+      snapshot.collection?.pollPhase,
+      snapshot.collection?.effectivePollIntervalMs,
+      snapshot.collection?.observedOpens,
+      snapshot.collection?.observedCloses,
+      snapshot.collection?.recoveredOwners,
       [...focused].join(","),
       el.selDensity.value,
     ].join("|");
@@ -502,6 +542,24 @@ function paint(forceSidebar = false) {
       el.statTraces.textContent = snapshot.tracesEnabled
         ? `Q${t.queued} · R${t.running} · ${t.done} done`
         : "offline";
+      const tracesRemaining = t.queued + t.running;
+      const tracesArePending = snapshot.tracesEnabled && tracesRemaining > 0;
+      el.traceProgress.hidden = !tracesArePending;
+      el.traceProgress.classList.toggle("actively-running", t.running > 0);
+      el.btnTraceAll.toggleAttribute("disabled", tracesArePending);
+      el.btnTraceAll.setAttribute("aria-busy", String(tracesArePending));
+      el.traceAllLabel.textContent = tracesArePending
+        ? `Tracing ${tracesRemaining}`
+        : "Trace all";
+      if (tracesArePending) {
+        el.traceProgressTitle.textContent = t.running > 0
+          ? "Traceroute in progress"
+          : "Traceroutes queued";
+        el.traceProgressDetail.textContent = `Current map is incomplete — ${tracesRemaining} ${tracesRemaining === 1 ? "route is" : "routes are"} still being measured`;
+        el.traceProgressCount.textContent = t.running > 0
+          ? `${t.running} active · ${t.queued} queued`
+          : `${t.queued} waiting`;
+      }
       if (el.statGeo) {
         const backend = snapshot.geoBackend ?? "api";
         el.statGeo.textContent = backend;
@@ -526,6 +584,9 @@ function paint(forceSidebar = false) {
       const collectionMode = collection?.mode === "event-assisted"
         ? " · TCP close events on"
         : " · TCP polling";
+      const captureCadence = collection?.pollPhase
+        ? ` · ${collection.pollPhase} ${collection.effectivePollIntervalMs ?? 0}ms`
+        : "";
       const collectionWarning = collection?.status === "degraded"
         ? ` · collector degraded: ${collection.message}`
         : "";
@@ -535,12 +596,19 @@ function paint(forceSidebar = false) {
       const dropped = collection?.droppedEvents
         ? ` · ${collection.droppedEvents} events dropped`
         : "";
-      el.status.textContent = `Live · ${snapshot.liveConnections} conns · ${mapPaths.length} paths${quality}${recovered}${collectionMode}${collectionWarning}${accessLimited}${dropped}${traffic}${trafficError}`;
+      el.status.textContent = `Live · ${snapshot.liveConnections} conns · ${mapPaths.length} paths${quality}${recovered}${collectionMode}${captureCadence}${collectionWarning}${accessLimited}${dropped}${traffic}${trafficError}`;
+      el.status.title = collection
+        ? `Session capture: ${collection.observedOpens ?? 0} opens, ${collection.observedCloses ?? 0} closes, ${collection.recoveredOwners ?? 0} owners recovered, ${(collection.unattributedOwnerGone ?? 0) + (collection.unattributedAmbiguous ?? 0) + (collection.unattributedAccessLimited ?? 0)} unattributed`
+        : "";
       el.btnClearFocus.hidden = focused.size === 0;
+      const focusedNames = snapshot.apps
+        .filter((app) => focused.has(app.id))
+        .map((app) => app.name);
       el.sidebarSub.textContent =
         focused.size === 0
           ? "Select an app to isolate traffic"
-          : `Isolating ${[...focused].join(", ")}`;
+          : `Isolating ${focusedNames.join(", ")}`;
+      renderNetworkOrigin(networkOrigin);
     }
   }
 
@@ -548,7 +616,7 @@ function paint(forceSidebar = false) {
   let hopCount = 0;
   let destCount = 0;
   if (globeReady) {
-    const stats = updateAllPaths(mapPaths);
+    const stats = updateAllPaths(mapPaths, networkOrigin);
     pathCount = stats.pathCount;
     hopCount = stats.hopCount;
     destCount = stats.destCount;
@@ -567,6 +635,37 @@ function paint(forceSidebar = false) {
     renderSidebar(groups);
     el.appList.scrollTop = scrollTop;
   }
+}
+
+function renderNetworkOrigin(origin: NetworkOrigin | null) {
+  el.networkOrigin.classList.toggle("locating", !origin || origin.status === "locating");
+  el.networkOrigin.classList.toggle("unavailable", origin?.status === "unavailable");
+  const exit = origin?.exit;
+  if (!origin || origin.status === "locating") {
+    el.networkOriginPlace.textContent = "Locating…";
+    el.networkOriginAssessment.textContent = "Inspecting route";
+    return;
+  }
+  if (!exit) {
+    el.networkOriginPlace.textContent = "Unavailable";
+    el.networkOriginAssessment.textContent = assessmentText(origin.assessment);
+    return;
+  }
+  el.networkOriginPlace.textContent = exit.city
+    ? `${exit.city}${exit.country ? `, ${exit.country}` : ""}`
+    : exit.ip || "Location unavailable";
+  el.networkOriginAssessment.textContent = assessmentText(origin.assessment);
+  el.networkOrigin.title = exit.organization
+    ? `${exit.organization}${exit.asn ? ` · AS${exit.asn}` : ""}`
+    : "Inspect primary network exit";
+}
+
+function assessmentText(assessment: NetworkOrigin["assessment"]): string {
+  if (assessment === "proxy_and_tunnel") return "Proxy + tunnel signals";
+  if (assessment === "proxy_configured") return "Proxy configured";
+  if (assessment === "tunnel_likely") return "VPN / tunnel likely";
+  if (assessment === "no_evidence") return "No VPN / proxy evidence";
+  return "Evidence unavailable";
 }
 
 function schedulePaint(snap?: SnapshotDto, immediate = false) {
@@ -597,8 +696,8 @@ function renderSidebar(groups: AppGroup[]) {
 
   const applications = groups
     .map((g) => {
-      const isOpen = expanded.has(g.name) || focused.has(g.name);
-      const isFocused = focused.has(g.name);
+      const isOpen = expanded.has(g.id) || focused.has(g.id);
+      const isFocused = focused.has(g.id);
       const dim = focused.size > 0 && !isFocused;
       const act = g.traffic
         ? `<span class="act"> · ↓${formatByteRate(g.traffic.rxBytesPerSec)} ↑${formatByteRate(g.traffic.txBytesPerSec)}</span>`
@@ -629,7 +728,7 @@ function renderSidebar(groups: AppGroup[]) {
               const destCity = lastCity ? ` · ${escapeHtml(lastCity)}` : "";
               // org from snapshot if available
               const destMeta = snapshot?.apps
-                .find((a) => a.name === g.name)
+                .find((a) => a.id === g.id)
                 ?.destinations.find(
                   (d) => d.ip === p.ip && d.port === p.port,
                 );
@@ -641,6 +740,9 @@ function renderSidebar(groups: AppGroup[]) {
                 : "";
               const nameSource = destMeta?.domainSource
                 ? ` · name: ${destMeta.domainSource}`
+                : "";
+              const nameConfidence = destMeta?.domainConfidence === "low"
+                ? ` <span class="badge name-guess">best guess</span>`
                 : "";
               const owners = g.processes.filter((process) =>
                 destMeta?.processIds?.includes(process.id),
@@ -657,7 +759,7 @@ function renderSidebar(groups: AppGroup[]) {
               return `<button type="button" class="dest-row${destMeta?.pathChanged ? " flash" : ""}${routeInspector.selectedRouteId === p.id ? " selected" : ""}" data-route-id="${escapeHtml(p.id)}" data-dest-host="${escapeHtml(p.host)}" title="Inspect route to ${escapeHtml(p.ip)}${escapeHtml(nameSource)}" aria-pressed="${routeInspector.selectedRouteId === p.id}">
                 <span class="dest-star${p.reachedTarget ? "" : " partial"}">${marker}</span>
                 <span class="dest-main">
-                  <span class="dest-host">${escapeHtml(p.host)}${org}${changed}</span>
+                  <span class="dest-host">${escapeHtml(p.host)}${nameConfidence}${org}${changed}</span>
                   <span class="dest-meta">:${p.port} · ${escapeHtml(p.protocol)} · ${p.reachedTarget ? rtt : `last reply ${rtt}`}${destCity}${escapeHtml(ownerLabel)}</span>
                 </span>
                 <span class="dest-side">${mapped > 0 ? traceState : statusBadge(p.status)}</span>
@@ -666,8 +768,8 @@ function renderSidebar(groups: AppGroup[]) {
             .join("")
         : "";
 
-      return `<div class="app-card${isFocused ? " focused" : ""}${dim ? " dim" : ""}" data-app="${escapeHtml(g.name)}">
-        <button type="button" class="app-row" data-app-toggle="${escapeHtml(g.name)}" aria-expanded="${isOpen}">
+      return `<div class="app-card${isFocused ? " focused" : ""}${dim ? " dim" : ""}" data-app="${escapeHtml(g.id)}">
+        <button type="button" class="app-row" data-app-toggle="${escapeHtml(g.id)}" aria-expanded="${isOpen}">
           <span class="swatch" style="background:${g.color};box-shadow:0 0 10px ${g.color}"></span>
           <span class="app-main">
             <span class="app-name">${escapeHtml(g.name)}</span>
@@ -743,6 +845,13 @@ function showToast(msg: string) {
 }
 
 function wireUi() {
+  el.networkOrigin.addEventListener("click", () => {
+    if (snapshot?.networkOrigin) {
+      setSelectedPath(null);
+      routeInspector.showOrigin(snapshot.networkOrigin, el.networkOrigin);
+      paint(true);
+    }
+  });
   el.appList.addEventListener("click", (ev) => {
     const routeButton = (ev.target as HTMLElement).closest<HTMLButtonElement>(
       "[data-route-id]",
@@ -757,21 +866,21 @@ function wireUi() {
       "[data-app-toggle]",
     );
     if (!btn) return;
-    const name = btn.dataset.appToggle!;
+    const appId = btn.dataset.appToggle!;
     const multi = (ev as MouseEvent).shiftKey;
 
     if (multi) {
-      if (focused.has(name)) focused.delete(name);
-      else focused.add(name);
-      expanded.add(name);
+      if (focused.has(appId)) focused.delete(appId);
+      else focused.add(appId);
+      expanded.add(appId);
     } else {
-      if (expanded.has(name) && focused.has(name) && focused.size === 1) {
-        expanded.delete(name);
+      if (expanded.has(appId) && focused.has(appId) && focused.size === 1) {
+        expanded.delete(appId);
         focused.clear();
       } else {
-        expanded.add(name);
+        expanded.add(appId);
         focused.clear();
-        focused.add(name);
+        focused.add(appId);
       }
     }
     paint(true);
@@ -901,6 +1010,11 @@ async function boot() {
       const place = selection.city || selection.hostname || selection.addr || "mapped node";
       el.status.textContent = `Inspecting ${place} · ${routeIds.length} route${routeIds.length === 1 ? "" : "s"}`;
     });
+    setOriginClickHandler((origin: NetworkOrigin) => {
+      setSelectedPath(null);
+      routeInspector.showOrigin(origin);
+      paint(true);
+    });
     globeReady = true;
   } catch (e) {
     el.globeStatus.textContent = `globe failed: ${String(e)}`;
@@ -908,7 +1022,6 @@ async function boot() {
 
   try {
     const settings = await invoke<SettingsDto>("get_settings");
-    privacyAccepted = !!settings.privacyAccepted;
     el.togEnhanced.checked = !!settings.enhancedMonitoring;
     el.togDomains.checked = settings.identifyDomains !== false;
     el.togExternal.checked = settings.externalOnly;
@@ -924,13 +1037,7 @@ async function boot() {
     /* preview */
   }
 
-  mountOnboarding(el.onboardingHost, {
-    privacyAccepted,
-    onAcceptPrivacy: async () => {
-      privacyAccepted = true;
-      await pushSettings();
-    },
-  });
+  mountOnboarding(el.onboardingHost);
 
   try {
     snapshot = await invoke<SnapshotDto>("get_snapshot");

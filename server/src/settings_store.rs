@@ -28,12 +28,17 @@ fn decode(raw: &str) -> Option<(SettingsDto, bool)> {
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
     let mut settings: SettingsDto = serde_json::from_value(value).ok()?;
-    let migrated = old_version < 2;
-    if migrated {
+    let migrated = old_version < 3;
+    if old_version < 2 {
         // includeUdp existed as a dormant, forcibly-false placeholder. Enable
         // the feature once now that the setting has real behavior.
         settings.include_udp = true;
-        settings.settings_version = 2;
+    }
+    if old_version < 3 {
+        // Monitoring and hosted geolocation now start immediately. Upgrade
+        // installations that still carry the former first-run consent gate.
+        settings.privacy_accepted = true;
+        settings.settings_version = 3;
     }
     Some((settings, migrated))
 }
@@ -51,14 +56,25 @@ mod tests {
         let (settings, migrated) = super::decode(r#"{"includeUdp":false}"#).unwrap();
         assert!(migrated);
         assert!(settings.include_udp);
-        assert_eq!(settings.settings_version, 2);
+        assert_eq!(settings.settings_version, 3);
     }
 
     #[test]
     fn versioned_udp_opt_out_is_preserved() {
         let (settings, migrated) =
-            super::decode(r#"{"settingsVersion":2,"includeUdp":false}"#).unwrap();
+            super::decode(r#"{"settingsVersion":3,"includeUdp":false}"#).unwrap();
         assert!(!migrated);
         assert!(!settings.include_udp);
+    }
+
+    #[test]
+    fn former_privacy_gate_is_enabled_on_upgrade() {
+        let (settings, migrated) =
+            super::decode(r#"{"settingsVersion":2,"privacyAccepted":false,"includeUdp":false}"#)
+                .unwrap();
+        assert!(migrated);
+        assert!(settings.privacy_accepted);
+        assert!(!settings.include_udp);
+        assert_eq!(settings.settings_version, 3);
     }
 }

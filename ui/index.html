@@ -55,6 +55,7 @@
 
         <div class="sidebar-foot">
           <div class="legend-row">
+            <span class="legend-item"><i class="lg-dot origin"></i> Network exit</span>
             <span class="legend-item"><i class="lg-dot hop"></i> Relay</span>
             <span class="legend-item"><i class="lg-dot dest"></i> Destination</span>
             <span class="legend-item"><i class="lg-dot partial"></i> Last mapped</span>
@@ -81,6 +82,28 @@
           <div class="heading-kicker"><span>02</span> Global traffic map</div>
           <h2>Live internet topology</h2>
           <p class="subtitle" id="globe-status">Acquiring network routes…</p>
+          <button id="network-origin" class="network-origin-readout locating" type="button" aria-label="Inspect primary network exit">
+            <span class="origin-readout-beacon" aria-hidden="true"><i></i></span>
+            <span class="origin-readout-copy">
+              <small>Primary network exit</small>
+              <strong id="network-origin-place">Locating…</strong>
+            </span>
+            <span id="network-origin-assessment" class="origin-assessment">Inspecting route</span>
+          </button>
+          <div
+            id="trace-progress"
+            class="trace-progress"
+            role="status"
+            aria-live="polite"
+            hidden
+          >
+            <span class="trace-progress-pulse" aria-hidden="true"></span>
+            <span class="trace-progress-copy">
+              <strong id="trace-progress-title">Traceroute in progress</strong>
+              <small id="trace-progress-detail">Current map is incomplete</small>
+            </span>
+            <span id="trace-progress-count" class="trace-progress-count"></span>
+          </div>
         </div>
 
         <div class="stats" aria-label="Network statistics">
@@ -100,7 +123,7 @@
         <span class="control-divider"></span>
         <button id="btn-trace-all" class="btn primary" type="button">
           <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 17.5 9 12l3.5 3.5L20 7"></path><circle cx="4" cy="17.5" r="1.5"></circle><circle cx="9" cy="12" r="1.5"></circle><circle cx="12.5" cy="15.5" r="1.5"></circle><circle cx="20" cy="7" r="1.5"></circle></svg>
-          Trace all
+          <span id="trace-all-label">Trace all</span>
         </button>
         <details class="settings-menu">
           <summary class="icon-btn" title="Map and capture settings">
@@ -172,7 +195,8 @@
           <h3>Privacy by design</h3>
           <ul>
             <li>Connection monitoring and process metadata stay on this machine.</li>
-            <li>Hosted geo may send public hop/destination IPs to mapmy.network after consent.</li>
+            <li>Hosted geo sends public hop/destination IPs to mapmy.network unless Local geolocation is enabled.</li>
+            <li>Your observed public egress IP is located automatically to show the primary network exit.</li>
             <li>Use a local GeoLite2 MMDB and Local geolocation to stay fully offline.</li>
           </ul>
           <p class="modal-note">

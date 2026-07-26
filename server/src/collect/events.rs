@@ -19,6 +19,14 @@ pub struct CollectionStatus {
     pub message: String,
     pub udp_remote: bool,
     pub access_limited: usize,
+    pub poll_phase: &'static str,
+    pub effective_poll_interval_ms: u64,
+    pub observed_opens: u64,
+    pub observed_closes: u64,
+    pub recovered_owners: u64,
+    pub unattributed_owner_gone: u64,
+    pub unattributed_ambiguous: u64,
+    pub unattributed_access_limited: u64,
 }
 
 #[derive(Debug, Default)]
@@ -120,7 +128,7 @@ impl LifecycleEvents {
                 ) {
                     "event-assisted"
                 } else {
-                    "polling"
+                    "adaptive-polling"
                 },
                 source: if matches!(
                     state.as_ref().map(|state| &state.backend),
@@ -140,20 +148,36 @@ impl LifecycleEvents {
                 message,
                 udp_remote: false,
                 access_limited: 0,
+                poll_phase: "idle",
+                effective_poll_interval_ms: 0,
+                observed_opens: 0,
+                observed_closes: 0,
+                recovered_owners: 0,
+                unattributed_owner_gone: 0,
+                unattributed_ambiguous: 0,
+                unattributed_access_limited: 0,
             }
         }
 
         #[cfg(not(target_os = "linux"))]
         CollectionStatus {
-            mode: "polling",
+            mode: "adaptive-polling",
             source: "portable-socket-table",
             captures_opens: false,
             captures_closes: false,
             dropped_events: dropped,
             status: "ready",
-            message: "Portable TCP socket polling".into(),
+            message: "Adaptive TCP socket polling".into(),
             udp_remote: false,
             access_limited: 0,
+            poll_phase: "idle",
+            effective_poll_interval_ms: 0,
+            observed_opens: 0,
+            observed_closes: 0,
+            recovered_owners: 0,
+            unattributed_owner_gone: 0,
+            unattributed_ambiguous: 0,
+            unattributed_access_limited: 0,
         }
     }
 

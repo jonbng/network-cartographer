@@ -7,6 +7,7 @@ use crate::collect::{
 };
 use crate::geo::{AsnDb, GeoCache, GeoHop, PathGeoCache};
 use crate::model::{display_name_for, AppEntry, AppState, DestStats};
+use crate::network_origin::NetworkOriginView;
 use crate::trace::{TraceEngine, TraceStatus};
 
 #[derive(Debug, Clone, Serialize)]
@@ -31,6 +32,39 @@ pub struct SnapshotDto {
     pub geo_mmdb: bool,
     pub geo_asn_mmdb: bool,
     pub settings: SettingsDto,
+    pub network_origin: NetworkOriginDto,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkOriginDto {
+    pub status: String,
+    pub exit: Option<NetworkExitDto>,
+    pub assessment: String,
+    pub evidence: Vec<NetworkOriginEvidenceDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkExitDto {
+    pub ip: Option<String>,
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub asn: Option<u32>,
+    pub organization: Option<String>,
+    pub source: String,
+    pub confidence: Option<f64>,
+    pub age_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkOriginEvidenceDto {
+    pub kind: String,
+    pub strength: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,6 +157,14 @@ pub struct CollectionDto {
     pub message: String,
     pub udp_remote: bool,
     pub access_limited: usize,
+    pub poll_phase: String,
+    pub effective_poll_interval_ms: u64,
+    pub observed_opens: u64,
+    pub observed_closes: u64,
+    pub recovered_owners: u64,
+    pub unattributed_owner_gone: u64,
+    pub unattributed_ambiguous: u64,
+    pub unattributed_access_limited: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +198,8 @@ pub struct DestDto {
     pub sni: Option<String>,
     pub domain: Option<String>,
     pub domain_source: String,
+    pub domain_confidence: String,
+    pub domain_alternatives_count: usize,
     pub process_ids: Vec<String>,
     pub asn: Option<u32>,
     pub org: Option<String>,
@@ -207,14 +251,14 @@ pub struct SettingsDto {
     pub identify_domains: bool,
     pub history_enabled: bool,
     pub enhanced_monitoring: bool,
-    /// User accepted first-run privacy notice (GeoIP / local monitoring).
+    /// Legacy compatibility flag. Monitoring now starts immediately.
     pub privacy_accepted: bool,
 }
 
 impl Default for SettingsDto {
     fn default() -> Self {
         Self {
-            settings_version: 2,
+            settings_version: 3,
             external_only: true,
             include_udp: true,
             traces_enabled: true,
@@ -226,7 +270,7 @@ impl Default for SettingsDto {
             identify_domains: true,
             history_enabled: false,
             enhanced_monitoring: false,
-            privacy_accepted: false,
+            privacy_accepted: true,
         }
     }
 }
@@ -251,6 +295,7 @@ pub struct SnapshotContext<'a> {
     pub collection_status: &'a CollectionStatus,
     pub destination_naming: &'a DestinationNamingStatus,
     pub udp_status: &'a UdpCollectionStatus,
+    pub network_origin: &'a NetworkOriginView,
 }
 
 pub fn build_snapshot(state: &AppState, context: &SnapshotContext<'_>) -> SnapshotDto {
@@ -277,6 +322,8 @@ pub fn build_snapshot(state: &AppState, context: &SnapshotContext<'_>) -> Snapsh
                 .collect(),
         })
     };
+
+    let network_origin = build_network_origin(context.network_origin, &apps, unattributed.as_ref());
 
     SnapshotDto {
         app_count: state.app_count(),
@@ -308,6 +355,14 @@ pub fn build_snapshot(state: &AppState, context: &SnapshotContext<'_>) -> Snapsh
             message: context.collection_status.message.clone(),
             udp_remote: context.collection_status.udp_remote,
             access_limited: context.collection_status.access_limited,
+            poll_phase: context.collection_status.poll_phase.into(),
+            effective_poll_interval_ms: context.collection_status.effective_poll_interval_ms,
+            observed_opens: context.collection_status.observed_opens,
+            observed_closes: context.collection_status.observed_closes,
+            recovered_owners: context.collection_status.recovered_owners,
+            unattributed_owner_gone: context.collection_status.unattributed_owner_gone,
+            unattributed_ambiguous: context.collection_status.unattributed_ambiguous,
+            unattributed_access_limited: context.collection_status.unattributed_access_limited,
         },
         destination_naming: DestinationNamingDto {
             enabled: context.settings.identify_domains,
@@ -337,7 +392,139 @@ pub fn build_snapshot(state: &AppState, context: &SnapshotContext<'_>) -> Snapsh
         geo_mmdb: context.geo.mmdb_loaded(),
         geo_asn_mmdb: context.asn.loaded(),
         settings: context.settings.clone(),
+        network_origin,
     }
+}
+
+fn build_network_origin(
+    origin: &NetworkOriginView,
+    apps: &[AppDto],
+    unattributed: Option<&TrafficGroupDto>,
+) -> NetworkOriginDto {
+    let hosted = origin.hosted.as_ref().map(|exit| NetworkExitDto {
+        ip: Some(exit.ip.clone()),
+        city: exit.city.clone(),
+        country: exit.country.clone(),
+        lat: exit.lat,
+        lon: exit.lon,
+        asn: exit.asn,
+        organization: exit.organization.clone(),
+        source: "hosted-egress".into(),
+        confidence: exit.confidence,
+        age_seconds: exit.observed_at.elapsed().as_secs(),
+    });
+    let fallback = hosted
+        .is_none()
+        .then(|| trace_origin(apps, unattributed))
+        .flatten();
+    let exit = hosted.or(fallback);
+    let status = if exit.is_some() {
+        "ready"
+    } else if origin.hosted_attempted {
+        "unavailable"
+    } else {
+        "locating"
+    };
+    NetworkOriginDto {
+        status: status.into(),
+        exit,
+        assessment: origin.assessment.into(),
+        evidence: origin
+            .evidence
+            .iter()
+            .map(|item| NetworkOriginEvidenceDto {
+                kind: item.kind.into(),
+                strength: item.strength.into(),
+                label: item.label.clone(),
+            })
+            .collect(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TraceOriginCandidate<'a> {
+    hop: &'a HopDto,
+    hits: u64,
+}
+
+fn trace_origin(apps: &[AppDto], unattributed: Option<&TrafficGroupDto>) -> Option<NetworkExitDto> {
+    let mut candidates = Vec::new();
+    for app in apps {
+        collect_trace_origins(&app.destinations, &mut candidates);
+    }
+    if let Some(group) = unattributed {
+        collect_trace_origins(&group.destinations, &mut candidates);
+    }
+    let winner = candidates.iter().copied().max_by(|left, right| {
+        let left_score = cluster_score(*left, &candidates);
+        let right_score = cluster_score(*right, &candidates);
+        left_score
+            .cmp(&right_score)
+            .then_with(|| right.hop.ttl.cmp(&left.hop.ttl))
+    })?;
+    Some(NetworkExitDto {
+        ip: winner.hop.addr.clone(),
+        city: winner.hop.city.clone(),
+        country: winner.hop.country.clone(),
+        lat: winner.hop.lat,
+        lon: winner.hop.lon,
+        asn: winner.hop.asn,
+        organization: winner.hop.org.clone(),
+        source: "trace-fallback".into(),
+        confidence: winner.hop.geo_confidence,
+        age_seconds: 0,
+    })
+}
+
+fn collect_trace_origins<'a>(
+    destinations: &'a [DestDto],
+    candidates: &mut Vec<TraceOriginCandidate<'a>>,
+) {
+    for destination in destinations {
+        if let Some(hop) = destination.trace.hops.iter().find(|hop| {
+            hop.addr.is_some()
+                && hop.lat.is_some()
+                && hop.lon.is_some()
+                && hop.geo_note.as_deref() != Some("private/local")
+        }) {
+            candidates.push(TraceOriginCandidate {
+                hop,
+                hits: destination.hits,
+            });
+        }
+    }
+}
+
+fn cluster_score(
+    candidate: TraceOriginCandidate<'_>,
+    all: &[TraceOriginCandidate<'_>],
+) -> (usize, u64) {
+    let Some((lat, lon)) = candidate.hop.lat.zip(candidate.hop.lon) else {
+        return (0, 0);
+    };
+    let nearby: Vec<_> = all
+        .iter()
+        .filter(|other| {
+            other
+                .hop
+                .lat
+                .zip(other.hop.lon)
+                .is_some_and(|(other_lat, other_lon)| {
+                    haversine_km(lat, lon, other_lat, other_lon) <= 150.0
+                })
+        })
+        .collect();
+    (nearby.len(), nearby.iter().map(|item| item.hits).sum())
+}
+
+fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let radius = 6371.0;
+    let radians = std::f64::consts::PI / 180.0;
+    let value = ((lat2 - lat1) * radians / 2.0).sin().powi(2)
+        + (lat1 * radians).cos()
+            * (lat2 * radians).cos()
+            * ((lon2 - lon1) * radians / 2.0).sin().powi(2);
+    2.0 * radius * value.sqrt().asin()
 }
 
 fn udp_monitoring_to_dto(enabled: bool, status: &UdpCollectionStatus) -> UdpMonitoringDto {
@@ -441,7 +628,7 @@ fn dest_to_dto(app: &AppEntry, d: &DestStats, context: &SnapshotContext<'_>) -> 
     let ip = d.remote.ip();
     let asn_info = context.asn.lookup(ip);
     let display_host = display_host_for(d);
-    let change_key = format!("{}|{}", display_name_for(app), ip);
+    let change_key = format!("{}|{}", app.id, ip);
     DestDto {
         host: d.display_host(),
         display_host,
@@ -458,6 +645,17 @@ fn dest_to_dto(app: &AppEntry, d: &DestStats, context: &SnapshotContext<'_>) -> 
             .map(|name| name.source.as_str().to_string())
             .or_else(|| d.hostname.as_ref().map(|_| "reverse-dns".into()))
             .unwrap_or_else(|| "ip".into()),
+        domain_confidence: d
+            .domain
+            .as_ref()
+            .map(|name| name.confidence.as_str().to_string())
+            .or_else(|| d.hostname.as_ref().map(|_| "low".into()))
+            .unwrap_or_else(|| "none".into()),
+        domain_alternatives_count: d
+            .domain
+            .as_ref()
+            .map(|name| name.alternatives_count)
+            .unwrap_or(0),
         process_ids: d.process_ids.iter().cloned().collect(),
         asn: asn_info.as_ref().map(|a| a.asn),
         org: asn_info.map(|a| a.org),
@@ -624,7 +822,7 @@ mod tests {
         assert!(!s.external_only);
         assert!(s.include_udp);
         assert_eq!(s.poll_interval_ms, 2000);
-        assert!(!s.privacy_accepted);
+        assert!(s.privacy_accepted);
         assert_eq!(s.globe_density, "all");
         assert!(s.identify_domains);
     }
@@ -654,5 +852,69 @@ mod tests {
         assert_eq!(value["reachedTarget"], true);
         assert_eq!(value["targetRttMs"], 12.0);
         assert!(value.get("reached_target").is_none());
+    }
+
+    #[test]
+    fn network_origin_fields_use_frontend_names() {
+        let origin = NetworkOriginDto {
+            status: "ready".into(),
+            exit: Some(NetworkExitDto {
+                ip: Some("1.1.1.1".into()),
+                city: Some("Sydney".into()),
+                country: Some("AU".into()),
+                lat: Some(-33.86),
+                lon: Some(151.2),
+                asn: Some(13335),
+                organization: Some("Cloudflare".into()),
+                source: "hosted-egress".into(),
+                confidence: Some(0.74),
+                age_seconds: 3,
+            }),
+            assessment: "no_evidence".into(),
+            evidence: Vec::new(),
+        };
+        let value = serde_json::to_value(origin).unwrap();
+        assert_eq!(value["exit"]["ageSeconds"], 3);
+        assert!(value["exit"].get("age_seconds").is_none());
+    }
+
+    #[test]
+    fn trace_origin_cluster_count_wins_before_historical_activity() {
+        fn hop(ttl: u8, lat: f64, lon: f64) -> HopDto {
+            HopDto {
+                ttl,
+                addr: Some(format!("192.0.2.{ttl}")),
+                rtt_ms: Some(10.0),
+                hostname: None,
+                lat: Some(lat),
+                lon: Some(lon),
+                city: None,
+                country: None,
+                geo_source: Some("mmdb".into()),
+                geo_confidence: Some(0.8),
+                geo_note: None,
+                asn: None,
+                org: None,
+            }
+        }
+        let nearby_a = hop(2, 40.71, -74.00);
+        let nearby_b = hop(3, 40.75, -73.95);
+        let far_busy = hop(4, 51.50, -0.12);
+        let candidates = vec![
+            TraceOriginCandidate {
+                hop: &nearby_a,
+                hits: 1,
+            },
+            TraceOriginCandidate {
+                hop: &nearby_b,
+                hits: 2,
+            },
+            TraceOriginCandidate {
+                hop: &far_busy,
+                hits: 10_000,
+            },
+        ];
+        assert_eq!(cluster_score(candidates[0], &candidates), (2, 3));
+        assert_eq!(cluster_score(candidates[2], &candidates), (1, 10_000));
     }
 }

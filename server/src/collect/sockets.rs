@@ -43,6 +43,18 @@ struct ObservedSocket {
     owner: Option<OwnerGroup>,
     active: bool,
     last_seen: Instant,
+    recovery_reported: bool,
+    first_seen: Instant,
+}
+
+#[derive(Debug, Default)]
+struct SessionCollectionStats {
+    opens: u64,
+    closes: u64,
+    recovered_owners: u64,
+    owner_gone: u64,
+    ambiguous: u64,
+    access_limited: u64,
 }
 
 #[derive(Debug)]
@@ -55,6 +67,8 @@ pub struct SocketCollector {
     udp_remote: bool,
     access_limited: usize,
     native_warnings: Vec<String>,
+    session: SessionCollectionStats,
+    topology_changed: bool,
 }
 
 impl Default for SocketCollector {
@@ -74,6 +88,8 @@ impl Default for SocketCollector {
             udp_remote: cfg!(any(target_os = "linux", target_os = "macos")),
             access_limited: 0,
             native_warnings: Vec::new(),
+            session: SessionCollectionStats::default(),
+            topology_changed: false,
         }
     }
 }
@@ -90,10 +106,8 @@ impl SocketCollector {
         Option<UnattributedReason>,
         bool,
     ) {
-        let is_new = !self
-            .observed
-            .get(key)
-            .is_some_and(|observed| observed.active);
+        let previous = self.observed.get(key).cloned();
+        let is_new = !previous.as_ref().is_some_and(|observed| observed.active);
         owners.sort_by(|a, b| a.id.cmp(&b.id));
         owners.dedup_by(|a, b| a.id == b.id);
 
@@ -114,7 +128,7 @@ impl SocketCollector {
                 is_new,
             )
         } else if app_ids.is_empty() {
-            match self.observed.get(key).and_then(|entry| entry.owner.clone()) {
+            match previous.as_ref().and_then(|entry| entry.owner.clone()) {
                 Some(owner) => (Some(owner), AttributionSource::Recovered, None, is_new),
                 None => (
                     None,
@@ -135,12 +149,45 @@ impl SocketCollector {
                 is_new,
             )
         };
+        let recovery_reported = previous
+            .as_ref()
+            .is_some_and(|entry| entry.recovery_reported)
+            || matches!(result.1, AttributionSource::Recovered);
+        let first_seen = previous
+            .as_ref()
+            .filter(|entry| entry.active)
+            .map(|entry| entry.first_seen)
+            .unwrap_or_else(Instant::now);
+        if matches!(result.1, AttributionSource::Recovered)
+            && !previous
+                .as_ref()
+                .is_some_and(|entry| entry.recovery_reported)
+        {
+            self.session.recovered_owners = self.session.recovered_owners.saturating_add(1);
+        }
+        if is_new {
+            self.session.opens = self.session.opens.saturating_add(1);
+            match result.2 {
+                Some(UnattributedReason::OwnerGone) => {
+                    self.session.owner_gone = self.session.owner_gone.saturating_add(1)
+                }
+                Some(UnattributedReason::Ambiguous) => {
+                    self.session.ambiguous = self.session.ambiguous.saturating_add(1)
+                }
+                Some(UnattributedReason::AccessLimited) => {
+                    self.session.access_limited = self.session.access_limited.saturating_add(1)
+                }
+                None => {}
+            }
+        }
         self.observed.insert(
             key.clone(),
             ObservedSocket {
                 owner: result.0.clone(),
                 active: true,
                 last_seen: Instant::now(),
+                recovery_reported,
+                first_seen,
             },
         );
         result
@@ -152,6 +199,12 @@ impl SocketCollector {
         enhanced: bool,
     ) -> Result<Vec<ConnectionObservation>> {
         self.events.ensure_started();
+        let previously_active: HashSet<_> = self
+            .observed
+            .iter()
+            .filter(|(_, observed)| observed.active)
+            .map(|(key, _)| key.clone())
+            .collect();
         // Apply close events before reading the current socket table. If a
         // tuple was destroyed and immediately reused, attribution below then
         // treats the current socket as a new connection instead of silently
@@ -205,6 +258,11 @@ impl SocketCollector {
             let owners = socket.pids.into_iter().map(process::resolve_info).collect();
             let (owner, attribution, reason, is_new) =
                 self.attribute(&key, owners, self.access_limited > 0);
+            let first_observed_at = self
+                .observed
+                .get(&key)
+                .map(|entry| entry.first_seen)
+                .unwrap_or_else(Instant::now);
             let processes = owner
                 .as_ref()
                 .map(|owner| owner.processes.clone())
@@ -227,6 +285,7 @@ impl SocketCollector {
                     attribution,
                     unattributed_reason: reason,
                     is_new,
+                    first_observed_at,
                     traffic_counters: socket.counters.map(|counters| {
                         crate::model::SocketTrafficCounters {
                             rx_bytes: counters.rx_bytes,
@@ -243,6 +302,11 @@ impl SocketCollector {
             .filter(|observation| observation.active)
             .map(|observation| observation.connection.socket_key())
             .collect();
+        self.topology_changed = previously_active != present;
+        self.session.closes = self
+            .session
+            .closes
+            .saturating_add(previously_active.difference(&present).count() as u64);
 
         let now = Instant::now();
         for (key, observed) in &mut self.observed {
@@ -280,8 +344,11 @@ impl SocketCollector {
                 owner: None,
                 active: false,
                 last_seen: now,
+                recovery_reported: false,
+                first_seen: now,
             },
         );
+        self.session.owner_gone = self.session.owner_gone.saturating_add(1);
         Some(ConnectionObservation {
             active: false,
             connection: Connection {
@@ -297,6 +364,7 @@ impl SocketCollector {
                 attribution: AttributionSource::Unattributed,
                 unattributed_reason: Some(UnattributedReason::OwnerGone),
                 is_new: true,
+                first_observed_at: now,
                 traffic_counters: None,
                 destination_name: None,
             },
@@ -306,6 +374,8 @@ impl SocketCollector {
     pub fn reset(&mut self) {
         self.observed.clear();
         self.events.clear();
+        self.session = SessionCollectionStats::default();
+        self.topology_changed = false;
     }
 
     pub fn traffic_status(&self) -> NativeTrafficStatus {
@@ -321,11 +391,21 @@ impl SocketCollector {
         status.source = self.native_source;
         status.udp_remote = self.udp_remote;
         status.access_limited = self.access_limited;
+        status.observed_opens = self.session.opens;
+        status.observed_closes = self.session.closes;
+        status.recovered_owners = self.session.recovered_owners;
+        status.unattributed_owner_gone = self.session.owner_gone;
+        status.unattributed_ambiguous = self.session.ambiguous;
+        status.unattributed_access_limited = self.session.access_limited;
         if !self.native_warnings.is_empty() && status.status == "ready" {
             status.status = "degraded";
             status.message = self.native_warnings.join("; ");
         }
         status
+    }
+
+    pub fn take_topology_changed(&mut self) -> bool {
+        std::mem::take(&mut self.topology_changed)
     }
 
     pub fn events_pending(&self) -> bool {

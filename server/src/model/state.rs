@@ -179,6 +179,12 @@ impl AppState {
             };
 
             entry.last_seen = now;
+            if !matches!(conn.attribution, AttributionSource::Unattributed)
+                && !conn.process_name.is_empty()
+                && conn.process_name != "unknown"
+            {
+                entry.name = conn.process_name.clone();
+            }
             if active {
                 entry.current_connections += 1;
             }
@@ -227,9 +233,8 @@ impl AppState {
             if let Some(name) = matched_name {
                 let replace = dest.domain.as_ref().is_none_or(|current| {
                     current.is_expired(now)
+                        || name.confidence > current.confidence
                         || name.source.priority() > current.source.priority()
-                        || (name.source == current.source
-                            && name.observed_at >= current.observed_at)
                 });
                 if replace {
                     dest.sni = (name.source == super::DestinationNameSource::TlsSni)
@@ -398,18 +403,26 @@ fn app_key(conn: &Connection) -> String {
 
 /// Short display name for UI.
 pub fn display_name_for(app: &AppEntry) -> String {
+    if !app.name.is_empty() {
+        let is_identity_path = app
+            .path
+            .as_ref()
+            .is_some_and(|path| path.to_string_lossy() == app.name)
+            || (app.name == app.id && (app.name.contains('/') || app.name.contains('\\')));
+        if !is_identity_path {
+            return app.name.clone();
+        }
+        if let Some(name) = std::path::Path::new(&app.name)
+            .file_name()
+            .and_then(|s| s.to_str())
+        {
+            return name.strip_suffix(".app").unwrap_or(name).to_string();
+        }
+    }
     if let Some(path) = &app.path {
         if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
             return name.strip_suffix(".app").unwrap_or(name).to_string();
         }
-    }
-    // key may be full path
-    if app.name.contains('/') || app.name.contains('\\') {
-        return std::path::Path::new(&app.name)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&app.name)
-            .to_string();
     }
     app.name.clone()
 }
@@ -442,6 +455,7 @@ mod tests {
                 attribution,
                 unattributed_reason: (!attributed).then_some(UnattributedReason::OwnerGone),
                 is_new,
+                first_observed_at: Instant::now(),
                 traffic_counters: None,
                 destination_name: None,
             },
@@ -479,6 +493,24 @@ mod tests {
         assert_eq!(state.app_count(), 1);
         assert_eq!(state.attribution.recovered, 1);
         assert_eq!(state.missing_pid_count, 0);
+    }
+
+    #[test]
+    fn friendly_app_name_wins_over_executable_path() {
+        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut hostnames = HostnameCache::new();
+        let mut observation = connection(AttributionSource::Direct, true);
+        observation.connection.application_id = Some("linux-desktop:app.zen_browser.zen".into());
+        observation.connection.process_name = "Zen Browser".into();
+        observation.connection.process_path = Some(PathBuf::from("/app/bin/zen"));
+        state.ingest(vec![observation], &mut hostnames);
+
+        let app = state.apps.get("linux-desktop:app.zen_browser.zen").unwrap();
+        assert_eq!(display_name_for(app), "Zen Browser");
+        assert_eq!(
+            app.path.as_deref(),
+            Some(std::path::Path::new("/app/bin/zen"))
+        );
     }
 
     #[test]

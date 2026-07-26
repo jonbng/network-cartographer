@@ -1,4 +1,4 @@
-import type { GlobeHop, GlobePath, HopSelection } from "./globe";
+import type { GlobeHop, GlobePath, HopSelection, NetworkOrigin } from "./globe";
 
 type InspectorOptions = {
   onClose: () => void;
@@ -8,7 +8,8 @@ type InspectorOptions = {
 type InspectorState =
   | { kind: "closed" }
   | { kind: "route"; routeId: string; lastRoute: GlobePath | null }
-  | { kind: "node"; selection: HopSelection };
+  | { kind: "node"; selection: HopSelection }
+  | { kind: "origin"; origin: NetworkOrigin };
 
 export class RouteInspector {
   private state: InspectorState = { kind: "closed" };
@@ -39,11 +40,14 @@ export class RouteInspector {
     return this.state.kind === "route" ? this.state.routeId : null;
   }
 
-  update(paths: GlobePath[]): void {
+  update(paths: GlobePath[], origin?: NetworkOrigin | null): void {
     this.paths = new Map(paths.map((path) => [path.id, path]));
     if (this.state.kind === "route") {
       const latest = this.paths.get(this.state.routeId) ?? null;
       if (latest) this.state.lastRoute = latest;
+    }
+    if (this.state.kind === "origin" && origin) {
+      this.state.origin = origin;
     }
     this.render();
   }
@@ -58,6 +62,12 @@ export class RouteInspector {
   showNode(selection: HopSelection, trigger?: HTMLElement | null): void {
     if (trigger) this.returnFocus = trigger;
     this.state = { kind: "node", selection };
+    this.open();
+  }
+
+  showOrigin(origin: NetworkOrigin, trigger?: HTMLElement | null): void {
+    if (trigger) this.returnFocus = trigger;
+    this.state = { kind: "origin", origin };
     this.open();
   }
 
@@ -83,6 +93,10 @@ export class RouteInspector {
       this.host.innerHTML = renderNodeChoices(this.state.selection, this.paths);
       return;
     }
+    if (this.state.kind === "origin") {
+      this.host.innerHTML = renderOrigin(this.state.origin);
+      return;
+    }
 
     const route = this.paths.get(this.state.routeId) ?? this.state.lastRoute;
     if (!route) {
@@ -94,6 +108,72 @@ export class RouteInspector {
     }
     this.host.innerHTML = renderRoute(route, !this.paths.has(this.state.routeId));
   }
+}
+
+function renderOrigin(origin: NetworkOrigin): string {
+  const exit = origin.exit;
+  if (!exit) {
+    return shell(
+      "Network exit unavailable",
+      `<div class="inspector-empty">The public exit could not be located yet. Route monitoring continues normally.</div>`,
+      "Network origin",
+    );
+  }
+  const place = exit.city
+    ? `${exit.city}${exit.country ? `, ${exit.country}` : ""}`
+    : "Location unavailable";
+  const assessment = assessmentLabel(origin.assessment);
+  const evidence = origin.evidence.length
+    ? origin.evidence
+        .map(
+          (item) => `<li class="origin-evidence ${item.strength}">
+            <span></span><div><strong>${escapeHtml(evidenceKind(item.kind))}</strong><p>${escapeHtml(item.label)}</p></div>
+          </li>`,
+        )
+        .join("")
+    : `<li class="origin-evidence supporting"><span></span><div><strong>No local signal</strong><p>No explicit proxy or default tunnel interface was found.</p></div></li>`;
+  const source = exit.source === "hosted-egress"
+    ? "Observed public egress"
+    : "Traceroute consensus fallback";
+  return shell(
+    "Primary network exit",
+    `<div class="inspector-body">
+      <section class="origin-hero">
+        <span class="origin-beacon" aria-hidden="true"><i></i></span>
+        <div><span class="inspector-label">${escapeHtml(source)}</span><h3>${escapeHtml(place)}</h3>
+        ${exit.ip ? `<code>${escapeHtml(exit.ip)}</code>` : ""}</div>
+      </section>
+      <section class="route-metrics origin-metrics">
+        <div><span>Assessment</span><strong class="${assessment.tone}">${escapeHtml(assessment.label)}</strong></div>
+        <div><span>Location confidence</span><strong>${escapeHtml(confidenceLabel(exit.confidence) || "unscored")}</strong></div>
+        <div><span>Network</span><strong>${escapeHtml(exit.organization || "—")}</strong></div>
+        <div><span>ASN</span><strong>${exit.asn ? `AS${exit.asn}` : "—"}</strong></div>
+      </section>
+      <section class="origin-evidence-section">
+        <div class="section-heading"><span>Routing evidence</span><b>${origin.evidence.length}</b></div>
+        <ul class="origin-evidence-list">${evidence}</ul>
+      </section>
+      <aside class="accuracy-note origin-note">
+        <strong>How to read this</strong>
+        <p>This is where the public internet sees this connection, not your physical location. Individual applications may use different routes. “No evidence” does not prove a direct connection.</p>
+      </aside>
+    </div>`,
+    "Network origin",
+  );
+}
+
+function assessmentLabel(assessment: NetworkOrigin["assessment"]): { label: string; tone: string } {
+  if (assessment === "proxy_and_tunnel") return { label: "Proxy + tunnel signals", tone: "partial" };
+  if (assessment === "proxy_configured") return { label: "Proxy configured", tone: "partial" };
+  if (assessment === "tunnel_likely") return { label: "VPN / tunnel likely", tone: "partial" };
+  if (assessment === "no_evidence") return { label: "No VPN / proxy evidence", tone: "confirmed" };
+  return { label: "Inspection unavailable", tone: "" };
+}
+
+function evidenceKind(kind: NetworkOrigin["evidence"][number]["kind"]): string {
+  if (kind === "default_interface") return "Default route";
+  if (kind === "system_proxy") return "System proxy";
+  return "Environment proxy";
 }
 
 function shell(title: string, body: string, kicker = "Route intelligence"): string {
@@ -158,6 +238,7 @@ function renderNodeChoices(
 }
 
 function renderRoute(path: GlobePath, inactive: boolean): string {
+  const tracePending = path.status === "running" || path.status === "queued";
   const answered = path.hops.filter((hop) => hop.addr != null).length;
   const located = path.hops.filter((hop) => hop.lat != null && hop.lon != null).length;
   const lastReply = [...path.hops].reverse().find((hop) => hop.rttMs != null)?.rttMs ?? null;
@@ -176,8 +257,13 @@ function renderRoute(path: GlobePath, inactive: boolean): string {
       <div class="route-app"><i style="background:${path.color};box-shadow:0 0 10px ${path.color}"></i>${escapeHtml(path.app)}</div>
       <h3>${escapeHtml(path.host)}</h3>
       <code>${escapeHtml(path.ip)}:${path.port} · ${escapeHtml(path.protocol)}</code>
+      ${renderDomainEvidence(path)}
       ${inactive ? `<div class="inactive-notice">No longer active · showing the last observed route</div>` : ""}
     </section>
+    ${tracePending ? `<div class="trace-incomplete" role="status">
+      <span class="trace-progress-pulse" aria-hidden="true"></span>
+      <div><strong>${path.status === "running" ? "Traceroute still running" : "Waiting to start traceroute"}</strong><span>This route is incomplete. Hops and locations may change as replies arrive.</span></div>
+    </div>` : ""}
     <section class="route-metrics">
       <div><span>Trace</span><strong class="${stateClass}">${escapeHtml(stateText)}</strong></div>
       <div><span>${path.reachedTarget ? "End-to-end RTT" : "Last reply RTT"}</span><strong>${rtt != null ? `${Math.round(rtt)}ms` : "—"}</strong></div>
@@ -194,6 +280,16 @@ function renderRoute(path: GlobePath, inactive: boolean): string {
   return shell(path.reachedTarget ? "Confirmed route" : "Route evidence", body);
 }
 
+function renderDomainEvidence(path: GlobePath): string {
+  if (!path.domainSource || path.domainSource === "ip") return "";
+  const confidence = path.domainConfidence ?? "none";
+  const alternatives = path.domainAlternativesCount
+    ? ` · ${path.domainAlternativesCount} other candidate${path.domainAlternativesCount === 1 ? "" : "s"}`
+    : "";
+  const label = confidence === "low" ? "best guess" : confidence;
+  return `<div class="location-evidence destination-evidence"><span class="confidence ${escapeHtml(confidence)}">${escapeHtml(label)}</span><span>${escapeHtml(path.domainSource)}${escapeHtml(alternatives)}</span></div>`;
+}
+
 function renderTimeline(path: GlobePath): string {
   if (path.hops.length === 0) {
     const message = path.status === "queued" || path.status === "running"
@@ -204,6 +300,16 @@ function renderTimeline(path: GlobePath): string {
 
   let previousNetwork = "__start__";
   const hasAsn = path.hops.some((hop) => hop.asn != null);
+  const firstPublicTtl = path.hops
+    .slice()
+    .sort((a, b) => a.ttl - b.ttl)
+    .find(
+      (hop) =>
+        hop.addr != null &&
+        hop.lat != null &&
+        hop.lon != null &&
+        hop.geoNote !== "private/local",
+    )?.ttl;
   return `<ol class="hop-timeline">${path.hops
     .slice()
     .sort((a, b) => a.ttl - b.ttl)
@@ -211,12 +317,12 @@ function renderTimeline(path: GlobePath): string {
       const networkKey = networkName(hop);
       const showNetwork = hasAsn && networkKey !== previousNetwork;
       previousNetwork = networkKey;
-      return `${showNetwork ? `<li class="network-boundary"><span>${escapeHtml(networkKey)}</span></li>` : ""}${renderHop(path, hop)}`;
+      return `${showNetwork ? `<li class="network-boundary"><span>${escapeHtml(networkKey)}</span></li>` : ""}${renderHop(path, hop, hop.ttl === firstPublicTtl)}`;
     })
     .join("")}</ol>`;
 }
 
-function renderHop(path: GlobePath, hop: GlobeHop): string {
+function renderHop(path: GlobePath, hop: GlobeHop, isFirstPublic: boolean): string {
   const isTarget = path.reachedTarget && hop.addr === path.ip;
   const timedOut = hop.addr == null;
   const location = hop.city
@@ -239,7 +345,7 @@ function renderHop(path: GlobePath, hop: GlobeHop): string {
     <div class="hop-copy">
       <div class="hop-primary"><strong>${escapeHtml(primary)}</strong><b>${hop.rttMs != null ? `${Math.round(hop.rttMs)}ms` : "—"}</b></div>
       ${secondary}
-      <div class="hop-place">${isTarget ? `<em>Final destination</em>` : ""}<span>${escapeHtml(location)}</span></div>
+      <div class="hop-place">${isFirstPublic ? `<em class="public-entry">First visible public hop</em>` : ""}${isTarget ? `<em>Final destination</em>` : ""}<span>${escapeHtml(location)}</span></div>
       ${evidence}
     </div>
   </li>`;

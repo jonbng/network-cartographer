@@ -29,6 +29,7 @@ parking_lot = "0.12"
 ureq = { version = "2", default-features = true, features = ["json"] }
 maxminddb = "0.24"
 dirs = "6"
+default-net = "0.22"
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -48,6 +49,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",
     "Win32_NetworkManagement_IpHelper",
+    "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ProcessSnapshotting",
     "Win32_System_Threading",
 ] }

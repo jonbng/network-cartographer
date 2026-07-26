@@ -89,6 +89,7 @@ pub async fn run() -> Result<(), String> {
     let address = listener
         .local_addr()
         .map_err(|error| format!("could not read server address: {error}"))?;
+    report_successful_startup();
     let url = format!("http://{address}");
     let _feed_discovery = match FeedDiscovery::write(&url, &observation_token) {
         Ok(discovery) => Some(discovery),
@@ -329,10 +330,6 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
             .name("geo-warm".into())
             .spawn(move || loop {
                 let settings = monitor.settings.lock().clone();
-                if !settings.privacy_accepted {
-                    thread::sleep(Duration::from_secs(1));
-                    continue;
-                }
                 let pending = monitor.pending_geo_ips();
                 if pending.is_empty() {
                     thread::sleep(Duration::from_secs(2));
@@ -344,6 +341,41 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
                 thread::sleep(Duration::from_millis(600));
             })
             .expect("spawn geo warmer");
+    }
+
+    {
+        let monitor = Arc::clone(&monitor);
+        thread::Builder::new()
+            .name("network-origin".into())
+            .spawn(move || {
+                let mut next_hosted = Instant::now();
+                let mut retry = Duration::from_secs(30);
+                loop {
+                    let route_changed = monitor.network_origin.refresh_local();
+                    let local_only = monitor.settings.lock().geo_local_only;
+                    let now = Instant::now();
+                    if !local_only && (route_changed || now >= next_hosted) {
+                        if route_changed {
+                            monitor.network_origin.invalidate_hosted();
+                        }
+                        match monitor.network_origin.refresh_hosted() {
+                            Ok(()) => {
+                                retry = Duration::from_secs(30);
+                                next_hosted = Instant::now() + Duration::from_secs(300);
+                            }
+                            Err(_) => {
+                                next_hosted = Instant::now() + retry;
+                                retry = (retry * 2).min(Duration::from_secs(300));
+                            }
+                        }
+                    } else if local_only {
+                        next_hosted = now;
+                        retry = Duration::from_secs(30);
+                    }
+                    thread::sleep(Duration::from_secs(10));
+                }
+            })
+            .expect("spawn network origin observer");
     }
 
     {
@@ -367,18 +399,34 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
         .name("monitor-poll".into())
         .spawn(move || {
             let mut last_socket_poll = Instant::now() - Duration::from_secs(10);
-            let mut last_geo_emit = Instant::now() - Duration::from_secs(10);
+            let mut last_snapshot_emit = Instant::now() - Duration::from_secs(10);
             let mut last_pending_geo = 0usize;
+            let mut cadence = AdaptiveCadence::new(Instant::now());
 
             loop {
-                let interval =
-                    Duration::from_millis(monitor.settings.lock().poll_interval_ms.max(500));
+                let now = Instant::now();
+                let idle_interval = Duration::from_millis(
+                    monitor.settings.lock().poll_interval_ms.clamp(500, 2_000),
+                );
+                let (phase, interval) = cadence.target(now, idle_interval);
                 let event_ready = monitor.collection_events_pending()
-                    && last_socket_poll.elapsed() >= Duration::from_millis(100);
+                    && last_socket_poll.elapsed() >= Duration::from_millis(50);
                 if last_socket_poll.elapsed() >= interval || event_ready {
+                    let effective_interval = last_socket_poll.elapsed();
+                    monitor.set_capture_runtime(
+                        phase,
+                        effective_interval.as_millis().min(u128::from(u64::MAX)) as u64,
+                    );
                     match monitor.tick() {
                         Ok(snapshot) => {
-                            let _ = events.send(ServerEvent::Snapshot(Box::new(snapshot)));
+                            let changed = monitor.take_collection_changed();
+                            if changed {
+                                cadence.note_change(Instant::now());
+                            }
+                            if changed || last_snapshot_emit.elapsed() >= Duration::from_secs(1) {
+                                let _ = events.send(ServerEvent::Snapshot(Box::new(snapshot)));
+                                last_snapshot_emit = Instant::now();
+                            }
                             for change in monitor.drain_path_change_events() {
                                 let _ = events.send(ServerEvent::PathChanged(change));
                             }
@@ -388,23 +436,73 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
                         }
                     }
                     last_socket_poll = Instant::now();
-                    last_geo_emit = Instant::now();
                     last_pending_geo = monitor.pending_geo_ips().len();
                 } else {
                     let pending = monitor.pending_geo_ips().len();
                     let geo_progressed = pending < last_pending_geo;
                     if (geo_progressed || pending > 0)
-                        && last_geo_emit.elapsed() >= Duration::from_millis(1500)
+                        && last_snapshot_emit.elapsed() >= Duration::from_millis(1500)
                     {
                         let _ = events.send(ServerEvent::Snapshot(Box::new(monitor.snapshot())));
-                        last_geo_emit = Instant::now();
+                        last_snapshot_emit = Instant::now();
                         last_pending_geo = pending;
                     }
                 }
-                thread::sleep(Duration::from_millis(350));
+                thread::sleep(Duration::from_millis(50));
             }
         })
         .expect("spawn monitor poll loop");
+}
+
+const DEFAULT_RUNS_URL: &str = "https://mapmy.network/api/v1/runs";
+
+fn report_successful_startup() {
+    if cfg!(debug_assertions) || std::env::var_os("NETCART_DISABLE_USAGE_PING").is_some() {
+        return;
+    }
+
+    let url = std::env::var("NETWORK_CARTOGRAPHER_RUNS_URL")
+        .unwrap_or_else(|_| DEFAULT_RUNS_URL.to_string());
+    let _ = thread::Builder::new()
+        .name("usage-ping".into())
+        .spawn(move || {
+            let agent = ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(2))
+                .timeout_read(Duration::from_secs(2))
+                .user_agent(concat!(
+                    "netcart/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (+https://mapmy.network)"
+                ))
+                .build();
+            // Best effort only: startup and shutdown never depend on telemetry.
+            let _ = agent.post(&url).call();
+        });
+}
+
+struct AdaptiveCadence {
+    last_change: Instant,
+}
+
+impl AdaptiveCadence {
+    fn new(now: Instant) -> Self {
+        Self { last_change: now }
+    }
+
+    fn note_change(&mut self, now: Instant) {
+        self.last_change = now;
+    }
+
+    fn target(&self, now: Instant, idle: Duration) -> (&'static str, Duration) {
+        let quiet_for = now.saturating_duration_since(self.last_change);
+        if quiet_for < Duration::from_secs(10) {
+            ("active", Duration::from_millis(250))
+        } else if quiet_for < Duration::from_secs(30) {
+            ("warm", Duration::from_millis(500))
+        } else {
+            ("idle", idle)
+        }
+    }
 }
 
 fn generate_observation_token() -> Result<String, String> {
@@ -573,5 +671,28 @@ mod tests {
         headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
         let result = record_sni(State(test_state("secret")), headers, Json(observation())).await;
         assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn adaptive_cadence_moves_from_active_to_warm_to_idle() {
+        let start = Instant::now();
+        let mut cadence = AdaptiveCadence::new(start);
+        assert_eq!(
+            cadence.target(start + Duration::from_secs(9), Duration::from_secs(1)),
+            ("active", Duration::from_millis(250))
+        );
+        assert_eq!(
+            cadence.target(start + Duration::from_secs(10), Duration::from_secs(1)),
+            ("warm", Duration::from_millis(500))
+        );
+        assert_eq!(
+            cadence.target(start + Duration::from_secs(30), Duration::from_secs(1)),
+            ("idle", Duration::from_secs(1))
+        );
+        cadence.note_change(start + Duration::from_secs(31));
+        assert_eq!(
+            cadence.target(start + Duration::from_secs(31), Duration::from_secs(1)),
+            ("active", Duration::from_millis(250))
+        );
     }
 }

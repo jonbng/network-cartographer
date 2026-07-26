@@ -6,6 +6,7 @@ fn main() {
             .file("src/collect/udp/macos.c")
             .warnings(true)
             .compile("netcart_udp_macos");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
         println!("cargo:rerun-if-changed=src/collect/udp/macos.c");
     }
 

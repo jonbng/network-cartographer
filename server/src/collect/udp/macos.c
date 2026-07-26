@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <errno.h>
 #include <libproc.h>
 #include <netinet/in.h>
@@ -6,6 +7,43 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/proc_info.h>
+
+size_t nc_bundle_display_name(const char *path, uint8_t *output, size_t capacity) {
+    if (path == NULL || output == NULL || capacity == 0) return 0;
+    output[0] = 0;
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(
+        kCFAllocatorDefault, (const UInt8 *)path, (CFIndex)strlen(path), true);
+    if (url == NULL) return 0;
+    CFBundleRef bundle = CFBundleCreate(kCFAllocatorDefault, url);
+    CFRelease(url);
+    if (bundle == NULL) return 0;
+
+    CFStringRef value = NULL;
+    CFDictionaryRef localized = CFBundleGetLocalInfoDictionary(bundle);
+    if (localized != NULL) {
+        value = (CFStringRef)CFDictionaryGetValue(localized, CFSTR("CFBundleDisplayName"));
+        if (value == NULL) {
+            value = (CFStringRef)CFDictionaryGetValue(localized, CFSTR("CFBundleName"));
+        }
+    }
+    if (value == NULL) {
+        CFDictionaryRef info = CFBundleGetInfoDictionary(bundle);
+        if (info != NULL) {
+            value = (CFStringRef)CFDictionaryGetValue(info, CFSTR("CFBundleDisplayName"));
+            if (value == NULL) {
+                value = (CFStringRef)CFDictionaryGetValue(info, CFSTR("CFBundleName"));
+            }
+        }
+    }
+
+    size_t written = 0;
+    if (value != NULL && CFGetTypeID(value) == CFStringGetTypeID() &&
+        CFStringGetCString(value, (char *)output, (CFIndex)capacity, kCFStringEncodingUTF8)) {
+        written = strlen((const char *)output);
+    }
+    CFRelease(bundle);
+    return written;
+}
 
 struct nc_udp_peer {
     uint32_t pid;

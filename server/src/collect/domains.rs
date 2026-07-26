@@ -1,6 +1,5 @@
 //! Local, unprivileged destination-name observations.
 
-#[cfg(target_os = "windows")]
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 #[cfg(target_os = "windows")]
@@ -11,7 +10,8 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::model::{
-    Connection, ConnectionObservation, DestinationName, DestinationNameSource, Protocol,
+    Connection, ConnectionObservation, DestinationName, DestinationNameSource, DomainConfidence,
+    Protocol, SocketKey,
 };
 
 const MAX_TTL: Duration = Duration::from_secs(600);
@@ -45,12 +45,14 @@ pub struct DestinationNamingStatus {
 
 pub struct DestinationNameCache {
     entries: Mutex<Vec<Observation>>,
+    selected: Mutex<HashMap<SocketKey, DestinationName>>,
 }
 
 impl DestinationNameCache {
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(Vec::new()),
+            selected: Mutex::new(HashMap::new()),
         }
     }
 
@@ -112,16 +114,44 @@ impl DestinationNameCache {
         let Ok(mut entries) = self.entries.lock() else {
             return;
         };
+        let Ok(mut selected) = self.selected.lock() else {
+            return;
+        };
         let now = Instant::now();
         entries.retain(|entry| !entry.name.is_expired(now));
+        selected.retain(|_, name| !name.is_expired(now));
         for observation in observations {
-            observation.connection.destination_name = best_match(&entries, &observation.connection);
+            let key = observation.connection.socket_key();
+            if observation.connection.is_new {
+                selected.remove(&key);
+            }
+            let candidate = best_match(&entries, &observation.connection);
+            let current = selected.get(&key).cloned();
+            let chosen = match (current, candidate) {
+                (Some(current), Some(candidate))
+                    if candidate.confidence > current.confidence
+                        || candidate.source.priority() > current.source.priority() =>
+                {
+                    candidate
+                }
+                (Some(current), _) => current,
+                (None, Some(candidate)) => candidate,
+                (None, None) => continue,
+            };
+            selected.insert(key, chosen.clone());
+            observation.connection.destination_name = Some(chosen);
+        }
+        if selected.len() > 8_192 {
+            selected.clear();
         }
     }
 
     pub fn clear(&self) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.clear();
+        }
+        if let Ok(mut selected) = self.selected.lock() {
+            selected.clear();
         }
     }
 }
@@ -139,22 +169,51 @@ fn timed_name(value: String, source: DestinationNameSource, ttl: Duration) -> De
         source,
         observed_at,
         expires_at: observed_at + ttl,
+        confidence: DomainConfidence::None,
+        alternatives_count: 0,
     }
 }
 
 fn best_match(entries: &[Observation], connection: &Connection) -> Option<DestinationName> {
-    entries
+    let matches: Vec<_> = entries
         .iter()
         .filter_map(|entry| match_score(entry, connection).map(|score| (score, entry)))
-        .max_by(|(left_score, left), (right_score, right)| {
-            left_score
-                .cmp(right_score)
-                .then_with(|| left.name.observed_at.cmp(&right.name.observed_at))
-        })
-        .map(|(_, entry)| entry.name.clone())
+        .collect();
+    let (_, chosen) =
+        matches
+            .iter()
+            .copied()
+            .max_by(|(left_score, left), (right_score, right)| {
+                left_score
+                    .cmp(right_score)
+                    .then_with(|| left.name.observed_at.cmp(&right.name.observed_at))
+            })?;
+    let mut alternatives: Vec<&str> = matches
+        .iter()
+        .filter(|(_, entry)| entry.name.source == chosen.name.source)
+        .map(|(_, entry)| entry.name.value.as_str())
+        .collect();
+    alternatives.sort_unstable();
+    alternatives.dedup();
+
+    let specificity = observation_specificity(chosen);
+    let delta = instant_delta(chosen.name.observed_at, connection.first_observed_at);
+    let mut confidence = match chosen.name.source {
+        DestinationNameSource::TlsSni if specificity == 7 => DomainConfidence::Exact,
+        DestinationNameSource::TlsSni => DomainConfidence::High,
+        DestinationNameSource::OsDns if delta <= Duration::from_secs(30) => DomainConfidence::High,
+        DestinationNameSource::OsDns => DomainConfidence::Low,
+    };
+    if alternatives.len() > 1 {
+        confidence = DomainConfidence::Low;
+    }
+    let mut name = chosen.name.clone();
+    name.confidence = confidence;
+    name.alternatives_count = alternatives.len().saturating_sub(1);
+    Some(name)
 }
 
-fn match_score(entry: &Observation, connection: &Connection) -> Option<u16> {
+fn match_score(entry: &Observation, connection: &Connection) -> Option<u32> {
     if entry.remote_ip != connection.remote.ip() {
         return None;
     }
@@ -180,11 +239,33 @@ fn match_score(entry: &Observation, connection: &Connection) -> Option<u16> {
         return None;
     }
 
-    let source = u16::from(entry.name.source.priority()) * 100;
-    let specificity = u16::from(entry.remote_port.is_some())
-        + u16::from(entry.pid.is_some()) * 2
-        + u16::from(entry.local.is_some()) * 4;
-    Some(source + specificity)
+    let source = u32::from(entry.name.source.priority()) * 1_000;
+    let specificity = u32::from(observation_specificity(entry)) * 100;
+    let delta = instant_delta(entry.name.observed_at, connection.first_observed_at);
+    let temporal = if delta <= Duration::from_secs(5) {
+        30
+    } else if delta <= Duration::from_secs(30) {
+        20
+    } else if delta <= Duration::from_secs(120) {
+        10
+    } else {
+        0
+    };
+    Some(source + specificity + temporal)
+}
+
+fn observation_specificity(entry: &Observation) -> u8 {
+    u8::from(entry.remote_port.is_some())
+        + u8::from(entry.pid.is_some()) * 2
+        + u8::from(entry.local.is_some()) * 4
+}
+
+fn instant_delta(left: Instant, right: Instant) -> Duration {
+    if left >= right {
+        left.duration_since(right)
+    } else {
+        right.duration_since(left)
+    }
 }
 
 pub fn normalize_hostname(value: &str) -> Result<String, String> {
@@ -371,6 +452,7 @@ mod tests {
                 attribution: AttributionSource::Direct,
                 unattributed_reason: None,
                 is_new: true,
+                first_observed_at: Instant::now(),
                 traffic_counters: None,
                 destination_name: None,
             },
@@ -398,6 +480,7 @@ mod tests {
         let name = connections[0].connection.destination_name.as_ref().unwrap();
         assert_eq!(name.value, "www.example.com");
         assert_eq!(name.source, DestinationNameSource::TlsSni);
+        assert_eq!(name.confidence, DomainConfidence::Exact);
     }
 
     #[test]
@@ -453,14 +536,44 @@ mod tests {
             .unwrap();
         let mut connections = vec![connection()];
         cache.enrich(&mut connections);
+        let name = connections[0].connection.destination_name.as_ref().unwrap();
+        assert_eq!(name.value, "second.example");
+        assert_eq!(name.confidence, DomainConfidence::Low);
+        assert_eq!(name.alternatives_count, 1);
+    }
+
+    #[test]
+    fn active_socket_keeps_equal_confidence_name_stable() {
+        let cache = DestinationNameCache::new();
+        cache
+            .record_dns("first.example", "203.0.113.10".parse().unwrap(), MAX_TTL)
+            .unwrap();
+        let mut observation = connection();
+        cache.enrich(std::slice::from_mut(&mut observation));
         assert_eq!(
-            connections[0]
+            observation
                 .connection
                 .destination_name
                 .as_ref()
                 .unwrap()
                 .value,
-            "second.example"
+            "first.example"
+        );
+
+        cache
+            .record_dns("second.example", "203.0.113.10".parse().unwrap(), MAX_TTL)
+            .unwrap();
+        observation.connection.is_new = false;
+        observation.connection.destination_name = None;
+        cache.enrich(std::slice::from_mut(&mut observation));
+        assert_eq!(
+            observation
+                .connection
+                .destination_name
+                .as_ref()
+                .unwrap()
+                .value,
+            "first.example"
         );
     }
 
