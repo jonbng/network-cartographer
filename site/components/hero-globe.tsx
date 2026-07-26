@@ -81,13 +81,13 @@ export function HeroGlobe() {
           <div className="preview-map-grid" aria-hidden="true" />
           <header className="preview-map-header">
             <div>
-              <span>Live traffic</span>
+              <span>Interactive preview</span>
               <strong>Network map</strong>
-              <small>Near-live · {apps.length} apps · {DEMO_PATHS.length} routes</small>
+              <small>Sample data · {apps.length} apps · {DEMO_PATHS.length} routes</small>
             </div>
           </header>
 
-          <span className="globe-demo-badge">Sample data</span>
+          <span className="globe-demo-badge">Product preview · Sample data</span>
           {status !== "ready" && (
             <p className="globe-fallback" aria-live="polite">
               {status === "error"
@@ -103,7 +103,8 @@ export function HeroGlobe() {
         </div>
       </div>
       <figcaption className="globe-caption">
-        Interactive demo preview, not live data from your machine. Drag to orbit, scroll to zoom.
+        Preview only — the actual tool runs locally with live data from your machine. Drag to orbit,
+        scroll to zoom.
       </figcaption>
     </figure>
   );
