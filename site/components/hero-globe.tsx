@@ -103,7 +103,7 @@ export function HeroGlobe() {
         </div>
       </div>
       <figcaption className="globe-caption">
-        Preview only — the actual tool runs locally with live data from your machine. Drag to orbit,
+        Preview only. The actual tool runs locally with live data from your machine. Drag to orbit,
         scroll to zoom.
       </figcaption>
     </figure>

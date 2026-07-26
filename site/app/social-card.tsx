@@ -4,7 +4,7 @@ export const socialImageSize = {
 };
 
 export const socialImageAlt =
-  "Network Cartographer — see where every app connects on a live 3D globe";
+  "Network Cartographer: see where every app connects on a live 3D globe";
 
 export function SocialCard() {
   return (
