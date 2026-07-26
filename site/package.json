@@ -9,6 +9,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@vercel/analytics": "^2.0.1",
     "globe.gl": "^2.46.1",
     "next": "^16.2.12",
     "react": "^19.2.8",
