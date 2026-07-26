@@ -73,7 +73,6 @@ pub async fn run() -> Result<(), String> {
         .route("/api/refresh", post(refresh))
         .route("/api/settings", get(settings).put(update_settings))
         .route("/api/reset", post(reset))
-        .route("/api/trace-all", post(trace_all))
         .route("/api/trace/{ip}", post(trace_one))
         .route(
             "/api/observations/sni",
@@ -199,16 +198,6 @@ async fn reset(
     require_local_action(&headers)?;
     state.monitor.reset();
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn trace_all(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<StatusCode, (StatusCode, String)> {
-    require_local_action(&headers)?;
-    let ips = state.monitor.state.lock().unique_remote_ips();
-    state.monitor.traces.lock().force_many(ips);
-    Ok(StatusCode::ACCEPTED)
 }
 
 async fn trace_one(
@@ -370,7 +359,7 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
                 let settings = monitor.settings.lock().clone();
                 let pending = monitor.pending_geo_ips();
                 if pending.is_empty() {
-                    thread::sleep(Duration::from_secs(2));
+                    thread::sleep(Duration::from_millis(250));
                     continue;
                 }
                 let batch: Vec<IpAddr> = pending.into_iter().take(40).collect();
@@ -449,6 +438,8 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
             let mut last_socket_poll = Instant::now() - Duration::from_secs(10);
             let mut last_snapshot_emit = Instant::now() - Duration::from_secs(10);
             let mut last_pending_geo = 0usize;
+            let mut traces_were_pending = false;
+            let mut trace_completion_due = false;
             let mut cadence = AdaptiveCadence::new(Instant::now());
 
             loop {
@@ -467,6 +458,12 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
                     );
                     match monitor.tick() {
                         Ok(snapshot) => {
+                            let traces_pending =
+                                snapshot.trace_stats.queued + snapshot.trace_stats.running > 0;
+                            if traces_were_pending && !traces_pending {
+                                trace_completion_due = true;
+                            }
+                            traces_were_pending = traces_pending;
                             let changed = monitor.take_collection_changed();
                             if changed {
                                 cadence.note_change(Instant::now());
@@ -474,6 +471,7 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
                             if changed || last_snapshot_emit.elapsed() >= Duration::from_secs(1) {
                                 let _ = events.send(ServerEvent::Snapshot(Box::new(snapshot)));
                                 last_snapshot_emit = Instant::now();
+                                trace_completion_due = false;
                             }
                             for change in monitor.drain_path_change_events() {
                                 let _ = events.send(ServerEvent::PathChanged(change));
@@ -488,14 +486,22 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
                     last_socket_poll = Instant::now();
                     last_pending_geo = monitor.pending_geo_ips().len();
                 } else {
+                    let traces_pending = monitor.traces_pending();
+                    if traces_were_pending && !traces_pending {
+                        trace_completion_due = true;
+                    }
+                    traces_were_pending = traces_pending;
                     let pending = monitor.pending_geo_ips().len();
                     let geo_progressed = pending < last_pending_geo;
-                    if (geo_progressed || pending > 0)
-                        && last_snapshot_emit.elapsed() >= Duration::from_millis(1500)
-                    {
+                    let trace_update_due = (traces_pending || trace_completion_due)
+                        && last_snapshot_emit.elapsed() >= Duration::from_secs(1);
+                    let geo_update_due = (geo_progressed || pending > 0)
+                        && last_snapshot_emit.elapsed() >= Duration::from_millis(1500);
+                    if trace_update_due || geo_update_due {
                         let _ = events.send(ServerEvent::Snapshot(Box::new(monitor.snapshot())));
                         last_snapshot_emit = Instant::now();
                         last_pending_geo = pending;
+                        trace_completion_due = false;
                     }
                 }
                 thread::sleep(Duration::from_millis(50));

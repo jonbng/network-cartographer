@@ -28,6 +28,7 @@ export class RouteInspector {
   private state: InspectorState = { kind: "closed" };
   private paths = new Map<string, GlobePath>();
   private returnFocus: HTMLElement | null = null;
+  private renderedMarkup = "";
 
   constructor(
     private readonly host: HTMLElement,
@@ -76,7 +77,7 @@ export class RouteInspector {
     if (this.state.kind === "origin" && origin) {
       this.state.origin = origin;
     }
-    this.render();
+    this.render(true);
   }
 
   showRoute(
@@ -116,14 +117,14 @@ export class RouteInspector {
     document.getElementById("app")?.classList.remove("inspector-open");
     this.options.onClose();
     this.options.onHighlightHop(null);
-    if (restoreFocus) this.returnFocus?.focus({ preventScroll: true });
+    if (restoreFocus) resolveReturnFocus(this.returnFocus)?.focus({ preventScroll: true });
     this.returnFocus = null;
   }
 
   private open(): void {
     this.host.hidden = false;
     document.getElementById("app")?.classList.add("inspector-open");
-    this.render();
+    this.render(false);
   }
 
   private async traceSelectedRoute(button: HTMLButtonElement): Promise<void> {
@@ -159,31 +160,86 @@ export class RouteInspector {
     this.options.onHighlightHop(null);
   }
 
-  private render(): void {
+  private render(preservePosition = true): void {
     if (this.state.kind === "closed") return;
+    let markup: string;
     if (this.state.kind === "node") {
-      this.host.innerHTML = renderNodeChoices(this.state.selection, this.paths);
-      return;
-    }
-    if (this.state.kind === "origin") {
-      this.host.innerHTML = renderOrigin(this.state.origin);
-      return;
+      markup = renderNodeChoices(this.state.selection, this.paths);
+    } else if (this.state.kind === "origin") {
+      markup = renderOrigin(this.state.origin);
+    } else {
+      const route = this.paths.get(this.state.routeId) ?? this.state.lastRoute;
+      markup = route
+        ? renderRoute(
+            route,
+            !this.paths.has(this.state.routeId),
+            this.state.segment,
+          )
+        : shell(
+            "Route unavailable",
+            `<div class="inspector-empty">This route is no longer present in the live snapshot.</div>`,
+          );
     }
 
-    const route = this.paths.get(this.state.routeId) ?? this.state.lastRoute;
-    if (!route) {
-      this.host.innerHTML = shell(
-        "Route unavailable",
-        `<div class="inspector-empty">This route is no longer present in the live snapshot.</div>`,
-      );
-      return;
-    }
-    this.host.innerHTML = renderRoute(
-      route,
-      !this.paths.has(this.state.routeId),
-      this.state.segment,
-    );
+    // Snapshots arrive continuously. Replacing identical markup destroys the
+    // inspector's native scroll, focus, hover, and text-selection state.
+    if (markup === this.renderedMarkup) return;
+
+    const previousBody = this.host.querySelector<HTMLElement>(".inspector-body");
+    const previousScrollTop = preservePosition ? previousBody?.scrollTop ?? 0 : 0;
+    const active = document.activeElement as HTMLElement | null;
+    const restoreFocus = preservePosition && active && this.host.contains(active)
+      ? focusIdentity(active)
+      : null;
+
+    this.host.innerHTML = markup;
+    this.renderedMarkup = markup;
+
+    const nextBody = this.host.querySelector<HTMLElement>(".inspector-body");
+    if (nextBody && preservePosition) nextBody.scrollTop = previousScrollTop;
+    if (restoreFocus) findByFocusIdentity(this.host, restoreFocus)?.focus({ preventScroll: true });
   }
+}
+
+type FocusIdentity = {
+  attribute: "data-inspector-close" | "data-inspector-trace" | "data-inspector-route" | "data-hop-ttl";
+  value: string | null;
+};
+
+function focusIdentity(element: HTMLElement): FocusIdentity | null {
+  for (const attribute of [
+    "data-inspector-close",
+    "data-inspector-trace",
+    "data-inspector-route",
+    "data-hop-ttl",
+  ] as const) {
+    if (element.hasAttribute(attribute)) {
+      return { attribute, value: element.getAttribute(attribute) };
+    }
+  }
+  return null;
+}
+
+function findByFocusIdentity(host: HTMLElement, identity: FocusIdentity): HTMLElement | null {
+  return [...host.querySelectorAll<HTMLElement>(`[${identity.attribute}]`)].find(
+    (element) => element.getAttribute(identity.attribute) === identity.value,
+  ) ?? null;
+}
+
+function resolveReturnFocus(original: HTMLElement | null): HTMLElement | null {
+  if (!original) return null;
+  if (original.isConnected && !original.hidden) return original;
+
+  for (const attribute of ["data-route-id", "data-app-toggle"] as const) {
+    const value = original.getAttribute(attribute);
+    if (value == null) continue;
+    const replacement = [...document.querySelectorAll<HTMLElement>(`[${attribute}]`)].find(
+      (element) => element.getAttribute(attribute) === value,
+    );
+    if (replacement) return replacement;
+  }
+
+  return original.id ? document.getElementById(original.id) : null;
 }
 
 function renderOrigin(origin: NetworkOrigin): string {
@@ -198,7 +254,9 @@ function renderOrigin(origin: NetworkOrigin): string {
   const place = exit.city
     ? `${exit.city}${exit.country ? `, ${exit.country}` : ""}`
     : "Location unavailable";
-  const assessment = assessmentLabel(origin.assessment);
+  const assessment = origin.assessment === "no_evidence"
+    ? null
+    : assessmentLabel(origin.assessment);
   const evidence = origin.evidence.length
     ? origin.evidence
         .map(
@@ -207,7 +265,7 @@ function renderOrigin(origin: NetworkOrigin): string {
           </li>`,
         )
         .join("")
-    : `<li class="origin-evidence supporting"><span></span><div><strong>No local signal</strong><p>No explicit proxy or default tunnel interface was found.</p></div></li>`;
+    : "";
   const source = exit.source === "hosted-egress"
     ? "Observed public egress"
     : "Traceroute consensus fallback";
@@ -220,18 +278,18 @@ function renderOrigin(origin: NetworkOrigin): string {
         ${exit.ip ? `<code>${escapeHtml(exit.ip)}</code>` : ""}</div>
       </section>
       <section class="route-metrics origin-metrics">
-        <div><span>Assessment</span><strong class="${assessment.tone}">${escapeHtml(assessment.label)}</strong></div>
+        ${assessment ? `<div><span>Assessment</span><strong class="${assessment.tone}">${escapeHtml(assessment.label)}</strong></div>` : ""}
         <div><span>Location confidence</span><strong>${escapeHtml(confidenceLabel(exit.confidence) || "unscored")}</strong></div>
-        <div><span>Network</span><strong>${escapeHtml(exit.organization || "—")}</strong></div>
-        <div><span>ASN</span><strong>${exit.asn ? `AS${exit.asn}` : "—"}</strong></div>
+        <div><span>Network</span><strong>${escapeHtml(exit.organization || "-")}</strong></div>
+        <div><span>ASN</span><strong>${exit.asn ? `AS${exit.asn}` : "-"}</strong></div>
       </section>
-      <section class="origin-evidence-section">
+      ${evidence ? `<section class="origin-evidence-section">
         <div class="section-heading"><span>Routing evidence</span><b>${origin.evidence.length}</b></div>
         <ul class="origin-evidence-list">${evidence}</ul>
-      </section>
+      </section>` : ""}
       <aside class="accuracy-note origin-note">
         <strong>How to read this</strong>
-        <p>This is where the public internet sees this connection, not your physical location. Individual applications may use different routes. “No evidence” does not prove a direct connection.</p>
+        <p>This is where the public internet sees this connection, not your physical location. Individual applications may use different routes.</p>
       </aside>
     </div>`,
     "Network origin",
@@ -242,7 +300,6 @@ function assessmentLabel(assessment: NetworkOrigin["assessment"]): { label: stri
   if (assessment === "proxy_and_tunnel") return { label: "Proxy + tunnel signals", tone: "partial" };
   if (assessment === "proxy_configured") return { label: "Proxy configured", tone: "partial" };
   if (assessment === "tunnel_likely") return { label: "VPN / tunnel likely", tone: "partial" };
-  if (assessment === "no_evidence") return { label: "No VPN / proxy evidence", tone: "confirmed" };
   return { label: "Inspection unavailable", tone: "" };
 }
 
@@ -252,7 +309,7 @@ function evidenceKind(kind: NetworkOrigin["evidence"][number]["kind"]): string {
   return "Environment proxy";
 }
 
-function shell(title: string, body: string, kicker = "Route intelligence"): string {
+function shell(title: string, body: string, kicker = "Route details"): string {
   return `<div class="inspector-head">
     <div>
       <span class="eyebrow">${escapeHtml(kicker)}</span>
@@ -293,6 +350,7 @@ function renderNodeChoices(
   const network = selection.org
     ? `<div class="node-network">${escapeHtml(selection.org)}${selection.asn ? ` · AS${selection.asn}` : ""}</div>`
     : "";
+  const lowConfidence = selection.geoConfidence != null && selection.geoConfidence < 0.55;
 
   return shell(
     place,
@@ -301,15 +359,18 @@ function renderNodeChoices(
         <span class="inspector-label">Shared node</span>
         ${selection.hostname ? `<strong>${escapeHtml(selection.hostname)}</strong>` : ""}
         ${selection.addr ? `<code>${escapeHtml(selection.addr)}</code>` : ""}
-        ${network}${evidence}
+        ${network}${lowConfidence ? `<div class="inline-warning">Location is an estimate</div>` : ""}
       </section>
       <section>
         <div class="section-heading"><span>Routes through this node</span><b>${selection.routes.length}</b></div>
         <div class="route-choices">${choices || `<div class="inspector-empty">No active routes remain.</div>`}</div>
       </section>
-      ${accuracyNote()}
+      <details class="diagnostic-details">
+        <summary>Accuracy &amp; sources</summary>
+        <div class="diagnostic-body">${evidence}${accuracyNote()}</div>
+      </details>
     </div>`,
-    "Node intelligence",
+    "Node details",
   );
 }
 
@@ -347,7 +408,7 @@ function renderRoute(
       <div class="route-app">${appIcon}${escapeHtml(path.app)}</div>
       <h3>${escapeHtml(path.host)}</h3>
       <code>${escapeHtml(path.ip)}:${path.port} · ${escapeHtml(path.protocol)}</code>
-      ${renderDomainEvidence(path)}
+      ${renderDomainWarning(path)}
       ${freshnessNotice}
       ${inactive ? `<div class="inactive-notice">No longer active · showing the last observed route</div>` : ""}
     </section>
@@ -358,18 +419,41 @@ function renderRoute(
     </div>` : ""}
     <section class="route-metrics">
       <div><span>Trace</span><strong class="${stateClass}">${escapeHtml(stateText)}</strong></div>
-      <div><span>${path.reachedTarget ? "End-to-end RTT" : "Last reply RTT"}</span><strong>${rtt != null ? `${Math.round(rtt)}ms` : "—"}</strong></div>
-      <div><span>Responses</span><strong>${answered}/${path.hops.length || "—"}</strong></div>
-      <div><span>Mapped</span><strong>${located}/${answered || "—"}</strong></div>
+      <div><span>${path.reachedTarget ? "End-to-end RTT" : "Last reply RTT"}</span><strong>${rtt != null ? `${Math.round(rtt)}ms` : "-"}</strong></div>
     </section>
     <section class="route-timeline-section">
       <div class="section-heading"><span>Observed route</span><b>${path.hops.length} TTL${path.hops.length === 1 ? "" : "s"}</b></div>
       ${timeline}
     </section>
     ${path.error ? `<div class="trace-error">${escapeHtml(path.error)}</div>` : ""}
-    ${accuracyNote()}
+    ${renderRouteDiagnostics(path, answered, located)}
   </div>`;
-  return shell(path.reachedTarget ? "Confirmed route" : "Route evidence", body);
+  return shell(path.reachedTarget ? "Confirmed route" : "Route details", body);
+}
+
+function renderDomainWarning(path: GlobePath): string {
+  return path.domainConfidence === "low"
+    ? `<div class="inline-warning">Destination name is a best guess</div>`
+    : "";
+}
+
+function renderRouteDiagnostics(path: GlobePath, answered: number, located: number): string {
+  const sources = path.hops
+    .filter((hop) => hop.geoSource || (hop.geoNote && hop.geoNote !== "private/local"))
+    .map((hop) => `<li><span>Hop ${hop.ttl}</span>${renderLocationEvidence(hop.geoSource ?? null, hop.geoConfidence ?? null, hop.geoNote ?? null)}</li>`)
+    .join("");
+  return `<details class="diagnostic-details">
+    <summary>Accuracy &amp; sources</summary>
+    <div class="diagnostic-body">
+      <section class="route-metrics diagnostic-metrics">
+        <div><span>Responses</span><strong>${answered}/${path.hops.length || "-"}</strong></div>
+        <div><span>Mapped</span><strong>${located}/${answered || "-"}</strong></div>
+      </section>
+      ${renderDomainEvidence(path)}
+      ${sources ? `<ul class="source-list">${sources}</ul>` : ""}
+      ${accuracyNote()}
+    </div>
+  </details>`;
 }
 
 function renderDomainEvidence(path: GlobePath): string {
@@ -437,20 +521,15 @@ function renderHop(
         : "Location unavailable";
   const primary = hop.hostname || hop.addr || "Request timed out";
   const secondary = hop.hostname && hop.addr ? `<code>${escapeHtml(hop.addr)}</code>` : "";
-  const evidence = renderLocationEvidence(
-    hop.geoSource ?? null,
-    hop.geoConfidence ?? null,
-    hop.geoNote ?? null,
-  );
+  const lowConfidence = hop.geoConfidence != null && hop.geoConfidence < 0.55;
   const mapped = hop.lat != null && hop.lon != null;
   const classes = [timedOut ? "timeout" : "", isTarget ? "target" : "", inSegment ? "segment-active" : ""].filter(Boolean).join(" ");
   return `<li class="hop-row ${classes}" data-hop-ttl="${hop.ttl}"${mapped ? ` tabindex="0" aria-label="Highlight hop ${hop.ttl} on globe"` : ""}>
     <div class="hop-marker"><span>${hop.ttl}</span></div>
     <div class="hop-copy">
-      <div class="hop-primary"><strong>${escapeHtml(primary)}</strong><b>${hop.rttMs != null ? `${Math.round(hop.rttMs)}ms` : "—"}</b></div>
+      <div class="hop-primary"><strong>${escapeHtml(primary)}</strong><b>${hop.rttMs != null ? `${Math.round(hop.rttMs)}ms` : "-"}</b></div>
       ${secondary}
-      <div class="hop-place">${isFirstPublic ? `<em class="public-entry">First visible public hop</em>` : ""}${isTarget ? `<em>Final destination</em>` : ""}<span>${escapeHtml(location)}</span></div>
-      ${evidence}
+      <div class="hop-place">${isFirstPublic ? `<em class="public-entry">First visible public hop</em>` : ""}${isTarget ? `<em>Final destination</em>` : ""}${lowConfidence ? `<em class="low-confidence">Estimated location</em>` : ""}<span>${escapeHtml(location)}</span></div>
     </div>
   </li>`;
 }
@@ -493,7 +572,7 @@ function sourceLabel(source: string): string {
 function accuracyNote(): string {
   return `<aside class="accuracy-note">
     <strong>How to read this</strong>
-    <p>Traceroute observes responding network hops. Locations are estimates, and globe arcs show topology—not physical cable routes. Confidence labels are heuristic, not probabilities.</p>
+    <p>Traceroute observes responding network hops. Locations are estimates, and globe arcs show topology, not physical cable routes. Confidence labels are heuristic, not probabilities.</p>
   </aside>`;
 }
 

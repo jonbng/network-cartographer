@@ -26,7 +26,6 @@ pub struct SnapshotDto {
     pub destination_naming: DestinationNamingDto,
     pub udp_monitoring: UdpMonitoringDto,
     pub capabilities: CapabilitiesDto,
-    pub external_only: bool,
     pub include_udp: bool,
     pub traces_enabled: bool,
     pub trace_stats: TraceStatsDto,
@@ -262,7 +261,6 @@ pub struct HopDto {
 #[serde(rename_all = "camelCase", default)]
 pub struct SettingsDto {
     pub settings_version: u32,
-    pub external_only: bool,
     pub include_udp: bool,
     pub traces_enabled: bool,
     pub poll_interval_ms: u64,
@@ -281,7 +279,6 @@ impl Default for SettingsDto {
     fn default() -> Self {
         Self {
             settings_version: 3,
-            external_only: true,
             include_udp: true,
             traces_enabled: true,
             poll_interval_ms: 1000,
@@ -404,7 +401,6 @@ pub fn build_snapshot(state: &AppState, context: &SnapshotContext<'_>) -> Snapsh
         capabilities: CapabilitiesDto {
             traffic_rates: cfg!(target_os = "linux"),
         },
-        external_only: state.external_only,
         include_udp: state.include_udp,
         traces_enabled: context.traces.enabled(),
         trace_stats: TraceStatsDto {
@@ -767,24 +763,48 @@ fn trace_to_dto(
             reached_target: false,
             target_rtt_ms: None,
         },
-        TraceStatus::Queued => TraceDto {
-            status: "queued".into(),
-            freshness: "fresh".into(),
-            label: "queued".into(),
-            hops: vec![],
-            error: None,
-            reached_target: false,
-            target_rtt_ms: None,
+        TraceStatus::Queued { previous } => match previous {
+            Some(result) => {
+                active_trace_to_dto(result, "queued", "refreshing", geo, path_geo, asn, settings)
+            }
+            None => empty_active_trace("queued", "queued"),
         },
-        TraceStatus::Running => TraceDto {
-            status: "running".into(),
-            freshness: "fresh".into(),
-            label: "tracing…".into(),
-            hops: vec![],
-            error: None,
-            reached_target: false,
-            target_rtt_ms: None,
-        },
+        TraceStatus::Running { previous, progress } => {
+            if progress.hops.is_empty() {
+                match previous {
+                    Some(result) => active_trace_to_dto(
+                        result,
+                        "running",
+                        "refreshing",
+                        geo,
+                        path_geo,
+                        asn,
+                        settings,
+                    ),
+                    None => empty_active_trace("running", "tracing…"),
+                }
+            } else {
+                let freshness = if previous.is_some() {
+                    "refreshing"
+                } else {
+                    "fresh"
+                };
+                active_trace_to_dto(
+                    crate::trace::TraceResult {
+                        target: progress.target,
+                        hops: progress.hops,
+                        finished_at: std::time::Instant::now(),
+                        error: None,
+                    },
+                    "running",
+                    freshness,
+                    geo,
+                    path_geo,
+                    asn,
+                    settings,
+                )
+            }
+        }
         TraceStatus::Failed { message, .. } => TraceDto {
             status: "failed".into(),
             freshness: "fresh".into(),
@@ -795,9 +815,6 @@ fn trace_to_dto(
             target_rtt_ms: None,
         },
         TraceStatus::Done(r) => completed_trace_to_dto(r, "fresh", geo, path_geo, asn, settings),
-        TraceStatus::Refreshing(r) => {
-            completed_trace_to_dto(r, "refreshing", geo, path_geo, asn, settings)
-        }
         TraceStatus::Stale {
             result, message, ..
         } => {
@@ -806,6 +823,32 @@ fn trace_to_dto(
             dto
         }
     }
+}
+
+fn empty_active_trace(status: &str, label: &str) -> TraceDto {
+    TraceDto {
+        status: status.into(),
+        freshness: "fresh".into(),
+        label: label.into(),
+        hops: vec![],
+        error: None,
+        reached_target: false,
+        target_rtt_ms: None,
+    }
+}
+
+fn active_trace_to_dto(
+    result: crate::trace::TraceResult,
+    status: &str,
+    freshness: &str,
+    geo: &GeoCache,
+    path_geo: &PathGeoCache,
+    asn: &AsnDb,
+    settings: &SettingsDto,
+) -> TraceDto {
+    let mut dto = completed_trace_to_dto(result, freshness, geo, path_geo, asn, settings);
+    dto.status = status.into();
+    dto
 }
 
 fn completed_trace_to_dto(
@@ -907,9 +950,8 @@ mod tests {
     #[test]
     fn settings_deserialize_partial_json() {
         // Frontend may omit newer fields; serde default fills them.
-        let raw = r#"{"externalOnly":false,"includeUdp":true,"tracesEnabled":true,"pollIntervalMs":2000}"#;
+        let raw = r#"{"includeUdp":true,"tracesEnabled":true,"pollIntervalMs":2000}"#;
         let s: SettingsDto = serde_json::from_str(raw).expect("partial settings");
-        assert!(!s.external_only);
         assert!(s.include_udp);
         assert_eq!(s.poll_interval_ms, 2000);
         assert!(s.privacy_accepted);
@@ -944,6 +986,34 @@ mod tests {
         assert_eq!(value["targetRttMs"], 12.0);
         assert_eq!(value["freshness"], "fresh");
         assert!(value.get("reached_target").is_none());
+    }
+
+    #[test]
+    fn active_trace_dto_keeps_running_status_and_partial_hops() {
+        let target = "1.1.1.1".parse().unwrap();
+        let result = crate::trace::TraceResult {
+            target,
+            hops: vec![crate::trace::Hop {
+                ttl: 1,
+                addr: Some("192.168.1.1".parse().unwrap()),
+                rtt_ms: Some(1.0),
+            }],
+            finished_at: std::time::Instant::now(),
+            error: None,
+        };
+        let dto = active_trace_to_dto(
+            result,
+            "running",
+            "fresh",
+            &GeoCache::new(),
+            &PathGeoCache::new(),
+            &AsnDb::new(),
+            &SettingsDto::default(),
+        );
+
+        assert_eq!(dto.status, "running");
+        assert_eq!(dto.hops.len(), 1);
+        assert!(!dto.reached_target);
     }
 
     #[test]

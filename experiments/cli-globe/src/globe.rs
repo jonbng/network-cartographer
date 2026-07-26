@@ -1,5 +1,5 @@
 //! Software 3D globe: equirectangular texture on a sphere, great-circle arcs, hop dots.
-//! Renders into an RGB framebuffer — no WebGL, no HTML.
+//! Renders into an RGB framebuffer, with no WebGL or HTML.
 
 use image::{DynamicImage, Rgb, RgbImage};
 use std::collections::BTreeSet;

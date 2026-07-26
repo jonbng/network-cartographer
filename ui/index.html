@@ -14,18 +14,37 @@
     <div id="app" class="app">
       <div id="globe" class="globe-stage"></div>
       <div class="map-grid" aria-hidden="true"></div>
-      <div id="onboarding-host" class="overlay onboarding-host"></div>
+      <div id="map-empty-state" class="overlay map-empty-state" role="status" aria-live="polite" hidden>
+        <span class="eyebrow">Getting started</span>
+        <strong id="map-empty-title">Waiting for internet activity</strong>
+        <p id="map-empty-detail">Open a website hosted in another region to give the map a route to follow.</p>
+      </div>
+
+      <section id="intro-modal" class="intro-modal" role="dialog" aria-modal="true" aria-labelledby="intro-title" aria-describedby="intro-copy" tabindex="-1">
+        <div class="intro-card">
+          <div class="intro-route" aria-hidden="true"><i></i><span></span><i></i></div>
+          <span class="eyebrow">Network Cartographer</span>
+          <h2 id="intro-title">See where your apps connect</h2>
+          <p id="intro-copy">Routes take a few seconds to measure and appear hop by hop. For a good demo, open a website hosted in another region or continent.</p>
+          <div class="intro-status" role="status" aria-live="polite">
+            <i aria-hidden="true"></i>
+            <div><strong id="intro-status-title">Starting the local monitor</strong><span id="intro-status-detail">Connecting to the collector…</span></div>
+          </div>
+          <div class="intro-actions">
+            <span>Connection monitoring stays on this machine</span>
+            <button id="btn-intro-dismiss" class="btn primary" type="button" disabled>View map</button>
+          </div>
+        </div>
+      </section>
 
       <div id="toast" class="overlay toast" hidden></div>
 
       <aside class="overlay sidebar" id="sidebar">
         <div class="brand">
-          <span class="logo" aria-hidden="true">NC</span>
           <div class="brand-copy">
             <span class="eyebrow">Network Cartographer</span>
-            <h1>Local traffic observatory</h1>
+            <h1>Apps and destinations</h1>
           </div>
-          <span class="live-mark"><i class="dot"></i>Live</span>
         </div>
 
         <div class="sidebar-tools">
@@ -44,7 +63,7 @@
 
         <div class="sidebar-head">
           <div>
-            <div class="sidebar-title"><span>01</span> Active applications</div>
+            <div class="sidebar-title">Active applications</div>
             <div class="sidebar-sub" id="sidebar-sub">Select a process to isolate its routes</div>
           </div>
           <button id="btn-clear-focus" class="btn text-btn sm" type="button" hidden>
@@ -73,10 +92,9 @@
 
       <header class="overlay header">
         <div class="map-heading">
-          <div class="heading-kicker"><span>02</span> Global traffic map</div>
-          <h2>Live internet topology</h2>
+          <div class="heading-kicker">Live traffic</div>
+          <h2>Network map</h2>
           <p class="subtitle" id="globe-status">Near-live view · new activity appears after a short delay</p>
-          <p class="session-summary" id="session-summary" hidden></p>
           <button id="network-origin" class="network-origin-readout locating" type="button" aria-label="Inspect primary network exit">
             <span class="origin-readout-beacon" aria-hidden="true"><i></i></span>
             <span class="origin-readout-copy">
@@ -85,28 +103,11 @@
             </span>
             <span id="network-origin-assessment" class="origin-assessment">Inspecting route</span>
           </button>
-          <div
-            id="trace-progress"
-            class="trace-progress"
-            role="status"
-            aria-live="polite"
-            hidden
-          >
-            <span class="trace-progress-pulse" aria-hidden="true"></span>
-            <span class="trace-progress-copy">
-              <strong id="trace-progress-title">Traceroute in progress</strong>
-              <small id="trace-progress-detail">Results arrive gradually · the map fills in as replies return</small>
-            </span>
-            <span id="trace-progress-count" class="trace-progress-count"></span>
-          </div>
         </div>
 
         <div class="stats" aria-label="Network statistics">
           <div class="stat"><span class="stat-label">Processes</span><strong id="stat-apps">0</strong></div>
           <div class="stat"><span class="stat-label">Routes</span><strong id="stat-paths">0</strong></div>
-          <div class="stat"><span class="stat-label">Nodes</span><strong id="stat-hops">0</strong></div>
-          <div class="stat technical"><span class="stat-label">Trace</span><strong id="stat-traces">—</strong></div>
-          <div class="stat technical"><span class="stat-label">Geo</span><strong id="stat-geo" title="Geolocation backend">…</strong></div>
         </div>
       </header>
 
@@ -115,52 +116,16 @@
           <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"></path></svg>
           <span>Recenter</span>
         </button>
-        <span class="control-divider"></span>
-        <button id="btn-trace-all" class="btn primary" type="button">
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 17.5 9 12l3.5 3.5L20 7"></path><circle cx="4" cy="17.5" r="1.5"></circle><circle cx="9" cy="12" r="1.5"></circle><circle cx="12.5" cy="15.5" r="1.5"></circle><circle cx="20" cy="7" r="1.5"></circle></svg>
-          <span id="trace-all-label">Trace all</span>
-        </button>
         <details class="settings-menu">
           <summary class="icon-btn" title="Map and capture settings">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19 13.5v-3l-2.2-.5a7.5 7.5 0 0 0-.8-1.8L17.2 6l-2.1-2.1L13 5.1a7.5 7.5 0 0 0-2-.1L9.2 3.9 7 6l1.1 2.2a7.5 7.5 0 0 0-.8 1.8l-2.3.5v3l2.3.5c.2.7.5 1.3.8 1.8L7 18l2.2 2.1L11 19a7.5 7.5 0 0 0 2 0l2.1 1.1 2.1-2.1-1.2-2.2c.4-.6.7-1.2.8-1.8l2.2-.5Z"></path></svg>
             <span>Options</span>
           </summary>
           <div class="settings-popover">
-            <div class="popover-head">
-              <div><span class="eyebrow">View configuration</span><strong>Map options</strong></div>
-              <button id="btn-reset" class="btn text-btn sm" type="button">Reset data</button>
-            </div>
-            <label class="setting-row">
-              <span><strong>External traffic</strong><small>Hide local connections</small></span>
-              <input type="checkbox" id="tog-external" checked />
-            </label>
-            <label class="setting-row">
-              <span><strong>UDP peers</strong><small id="udp-status">Connected sockets, no administrator access</small></span>
-              <input type="checkbox" id="tog-udp" checked />
-            </label>
-            <label class="setting-row">
-              <span><strong>Traceroutes</strong><small>Map path hops</small></span>
-              <input type="checkbox" id="tog-traces" checked />
-            </label>
+            <div class="popover-head"><div><span class="eyebrow">Display</span><strong>Map options</strong></div></div>
             <label class="setting-row">
               <span><strong>City labels</strong><small>Name mapped regions</small></span>
               <input type="checkbox" id="tog-labels" checked />
-            </label>
-            <label class="setting-row">
-              <span><strong>Local geolocation</strong><small>Use an offline database</small></span>
-              <input type="checkbox" id="tog-local-geo" />
-            </label>
-            <label class="setting-row">
-              <span><strong>Session archive</strong><small>Write local JSONL snapshots every minute</small></span>
-              <input type="checkbox" id="tog-history" />
-            </label>
-            <label class="setting-row" id="traffic-setting">
-              <span><strong>Traffic rates</strong><small id="traffic-status">Native per-app upload and download</small></span>
-              <input type="checkbox" id="tog-enhanced" />
-            </label>
-            <label class="setting-row">
-              <span><strong>Destination domains</strong><small id="domains-status">Use local DNS and SNI observations</small></span>
-              <input type="checkbox" id="tog-domains" checked />
             </label>
             <label class="density-row" for="sel-density">
               <span><strong>Node density</strong><small>Detail shown on globe</small></span>
@@ -170,16 +135,40 @@
                 <option value="hubs">Hubs + destinations</option>
               </select>
             </label>
+            <details class="advanced-settings">
+              <summary>Advanced</summary>
+              <div class="advanced-settings-body">
+                <label class="setting-row">
+                  <span><strong>UDP peers</strong><small id="udp-status">Connected sockets, no administrator access</small></span>
+                  <input type="checkbox" id="tog-udp" checked />
+                </label>
+                <label class="setting-row">
+                  <span><strong>Traceroutes</strong><small>Measure and map network hops</small></span>
+                  <input type="checkbox" id="tog-traces" checked />
+                </label>
+                <label class="setting-row">
+                  <span><strong>Local geolocation</strong><small>Use an offline MaxMind database</small></span>
+                  <input type="checkbox" id="tog-local-geo" />
+                </label>
+                <label class="setting-row" id="traffic-setting">
+                  <span><strong>Traffic rates</strong><small id="traffic-status">Native per-app upload and download</small></span>
+                  <input type="checkbox" id="tog-enhanced" />
+                </label>
+                <label class="setting-row">
+                  <span><strong>Destination domains</strong><small id="domains-status">Use local DNS and SNI observations</small></span>
+                  <input type="checkbox" id="tog-domains" checked />
+                </label>
+                <button id="btn-reset" class="btn text-btn clear-session" type="button">Clear current session</button>
+              </div>
+            </details>
           </div>
         </details>
       </div>
 
       <div class="overlay map-key" aria-label="Map key">
-        <span class="map-key-title">Map key</span>
-        <span class="map-key-item"><i class="route-key observed"></i><span>Observed</span></span>
-        <span class="map-key-item" title="Route evidence is missing"><i class="route-key unmapped"></i><span>Missing</span></span>
-        <span class="map-key-item" title="Moving amber dashes mean traceroute is measuring this unresolved span"><i class="route-key unmapped active"></i><span>Measuring</span></span>
-        <span class="map-key-item" title="Moving pulses show route direction, not traffic volume"><i class="route-key direction"></i><span>Direction, not traffic</span></span>
+        <span class="map-key-item"><i class="route-key observed"></i><span>Route</span></span>
+        <span class="map-key-item" title="Traceroute did not receive replies for this span"><i class="route-key unmapped"></i><span>Gap</span></span>
+        <span class="map-key-item" title="Moving signals show recent route activity and direction, not traffic volume"><i class="route-key direction"></i><span>Direction</span></span>
         <details class="node-key">
           <summary>Nodes</summary>
           <div class="node-key-popover">
@@ -209,12 +198,6 @@
         </details>
         <span class="hint"><kbd>drag</kbd> orbit <i></i> <kbd>scroll</kbd> zoom <i></i> select a route or node to inspect</span>
       </footer>
-
-      <div id="first-route-reveal" class="overlay first-route-reveal" role="status" aria-live="polite" hidden>
-        <span class="reveal-kicker">First route mapped</span>
-        <strong id="first-route-title"></strong>
-        <small id="first-route-detail"></small>
-      </div>
 
       <button id="network-transition" class="overlay network-transition" type="button" aria-live="polite" hidden>
         <span class="transition-kicker"><i aria-hidden="true"></i> Network transition</span>

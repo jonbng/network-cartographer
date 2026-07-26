@@ -68,11 +68,7 @@ impl Monitor {
 
         Self {
             collector: Mutex::new(SocketCollector::default()),
-            state: Mutex::new(AppState::new(
-                retain,
-                settings.external_only,
-                settings.include_udp,
-            )),
+            state: Mutex::new(AppState::new(retain, settings.include_udp)),
             hostnames: Mutex::new(HostnameCache::new()),
             traces: Mutex::new(TraceEngine::new(trace_cfg)),
             geo: GeoCache::new(),
@@ -93,7 +89,6 @@ impl Monitor {
         let settings = self.settings.lock().clone();
         {
             let mut state = self.state.lock();
-            state.external_only = settings.external_only;
             state.include_udp = settings.include_udp;
         }
 
@@ -221,7 +216,6 @@ impl Monitor {
         let _ = settings_store::save(&settings);
         {
             let mut state = self.state.lock();
-            state.external_only = settings.external_only;
             state.include_udp = settings.include_udp;
         }
         if domains_disabled {
@@ -260,23 +254,58 @@ impl Monitor {
     }
 
     pub fn pending_geo_ips(&self) -> Vec<IpAddr> {
-        let traces = self.traces.lock();
+        let mut traces = self.traces.lock();
+        traces.poll();
         let state = self.state.lock();
         let mut set = HashSet::new();
 
-        for app in state.sorted_apps() {
-            for dest in app.destinations.values() {
-                if let TraceStatus::Done(r) = traces.get(dest.remote.ip()) {
-                    for ip in pending_ips(&r.hops, &self.geo) {
-                        set.insert(ip);
+        let destination_ips = state
+            .sorted_apps()
+            .into_iter()
+            .flat_map(|app| app.destinations.values().map(|dest| dest.remote.ip()))
+            .chain(
+                state
+                    .unattributed()
+                    .destinations
+                    .values()
+                    .map(|dest| dest.remote.ip()),
+            )
+            .collect::<Vec<_>>();
+        for destination_ip in destination_ips {
+            let status = traces.get(destination_ip);
+            let hops = match &status {
+                TraceStatus::Done(result) => Some(result.hops.as_slice()),
+                TraceStatus::Running { previous, progress } => {
+                    if progress.hops.is_empty() {
+                        previous.as_ref().map(|result| result.hops.as_slice())
+                    } else {
+                        Some(progress.hops.as_slice())
                     }
-                    if self.geo.needs_resolve(dest.remote.ip()) {
-                        set.insert(dest.remote.ip());
-                    }
+                }
+                TraceStatus::Queued {
+                    previous: Some(result),
+                } => Some(result.hops.as_slice()),
+                _ => None,
+            };
+            if let Some(hops) = hops {
+                for ip in pending_ips(hops, &self.geo) {
+                    set.insert(ip);
+                }
+            }
+            if matches!(&status, TraceStatus::Running { .. } | TraceStatus::Done(_)) {
+                if self.geo.needs_resolve(destination_ip) {
+                    set.insert(destination_ip);
                 }
             }
         }
         set.into_iter().collect()
+    }
+
+    pub fn traces_pending(&self) -> bool {
+        let mut traces = self.traces.lock();
+        traces.poll();
+        let stats = traces.stats();
+        stats.queued + stats.running > 0
     }
 
     fn detect_path_changes(&self) {

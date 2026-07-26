@@ -1,14 +1,20 @@
 import Globe from "globe.gl";
+import * as THREE from "three";
+import optimerTypeface from "./optimer_regular.typeface.json";
 import {
   ambientRouteCandidates,
   ambientMotionAllowed,
+  buildNewHopPulsePath,
   buildPulsePathPoints,
+  cameraCompensatedScale,
   chooseAmbientRoute,
   classifySegment,
   gapShouldAnimate,
   isLocated,
   segmentVisualState,
   selectionAllowsMotion,
+  segmentHasVisibleDistance,
+  selectNonOverlappingLabels,
   type PulsePoint,
   type SegmentKind,
 } from "./globe-geometry";
@@ -175,7 +181,12 @@ type Point = {
   isOrigin: boolean;
 };
 
-type OriginRing = { lat: number; lng: number };
+type ActivityRing = {
+  lat: number;
+  lng: number;
+  kind: "origin" | "arrival";
+  color?: string;
+};
 
 type GapLabel = {
   lat: number;
@@ -191,10 +202,12 @@ type Arc = {
   endLat: number;
   endLng: number;
   color: string | string[];
+  brightColor: string[];
   pathId: string;
   app: string;
   host: string;
   dimmed: boolean;
+  active: boolean;
   stroke: number;
   fromTtl: number;
   toTtl: number;
@@ -211,7 +224,7 @@ type PulsePath = {
   dashLength: number;
   dashGap: number;
   duration: number;
-  tone: "selected" | "ambient";
+  tone: "selected" | "ambient" | "reveal";
 };
 
 type HighlightedHop = { pathId: string; ttl: number };
@@ -237,6 +250,18 @@ let pulseTimer: ReturnType<typeof setTimeout> | null = null;
 let pulseClearTimer: ReturnType<typeof setTimeout> | null = null;
 let lastAmbientPathId: string | null = null;
 let cameraInteracting = false;
+let cameraScale = 1;
+let zoomRefreshFrame: number | null = null;
+let originRing: ActivityRing | null = null;
+let arrivalRing: ActivityRing | null = null;
+let pulseArrivalTimer: ReturnType<typeof setTimeout> | null = null;
+let arrivalClearTimer: ReturnType<typeof setTimeout> | null = null;
+let previousPathHits = new Map<string, number>();
+let previousPathHops = new Map<string, GlobeHop[]>();
+let hasHopBaseline = false;
+const markerObjects = new Set<THREE.Group>();
+let currentLabelPoints: Point[] = [];
+let currentGapLabels: GapLabel[] = [];
 
 const PALETTE = [
   "#e0a86a",
@@ -377,57 +402,29 @@ export function initGlobe(container: HTMLElement) {
     .showAtmosphere(true)
     .atmosphereColor("#e0a86a")
     .atmosphereAltitude(0.2)
-    .globeImageUrl("/earth-dark.jpg")
-    .pointAltitude((d: object) =>
-      (d as Point).isOrigin ? 0.028 : (d as Point).isDestination ? 0.018 : 0.008,
-    )
-    .pointRadius("size")
-    .pointColor("color")
+    .globeImageUrl("/earth-dark.webp")
+    .pointAltitude(pointAltitude)
+    .pointRadius(pointRadius)
+    // Cylinders make useful interaction targets, but poor markers. The visible
+    // nodes live in the custom Three.js layer below.
+    .pointColor(() => "rgba(0,0,0,0)")
     .pointsMerge(false)
     .pointLabel((d: object) => hopTooltip(d as Point))
-    .onPointClick((d: object) => {
-      const p = d as Point;
-      if (p.isOrigin) {
-        if (currentOrigin) onOriginClick?.(currentOrigin);
-        return;
-      }
-      const routes = [...new Map(p.through.map((route) => [route.pathId, route])).values()];
-      onHopClick?.({
-        lat: p.lat,
-        lon: p.lng,
-        city: p.city,
-        country: p.country,
-        addr: p.addr,
-        hostname: p.hostname,
-        asn: p.asn,
-        org: p.org,
-        geoSource: p.geoSource,
-        geoConfidence: p.geoConfidence,
-        geoNote: p.geoNote,
-        routes,
-      });
-    })
+    .onPointClick((d: object) => selectPoint(d as Point))
     .arcColor((d: object) => {
       const a = d as Arc;
       if (a.dimmed) return ["rgba(120,140,160,0.1)", "rgba(120,140,160,0.06)"];
       if (a.kind === "unmapped") {
         return isArcEmphasized(a) ? "#f2c66d" : "rgba(217,185,110,0.76)";
       }
+      if (isArcEmphasized(a)) return a.brightColor;
       return a.color;
     })
-    .arcStroke((d: object) => {
-      const arc = d as Arc;
-      return isArcEmphasized(arc) ? Math.max(0.66, arc.stroke * 1.65) : arc.stroke;
-    })
+    .arcStroke(arcStroke)
     .arcAltitudeAutoScale(0.26)
-    .arcDashLength((d: object) => ((d as Arc).kind === "unmapped" ? 0.09 : 1))
-    .arcDashGap((d: object) => ((d as Arc).kind === "unmapped" ? 0.055 : 0))
-    .arcDashAnimateTime((d: object) => {
-      const arc = d as Arc;
-      return !arc.dimmed && gapShouldAnimate(arc.kind, arc.traceStatus, reduceMotion)
-        ? 2800
-        : 0;
-    })
+    .arcDashLength(arcDashLength)
+    .arcDashGap(arcDashGap)
+    .arcDashAnimateTime(arcDashAnimateTime)
     .arcLabel((d: object) => segmentTooltip(d as Arc))
     .onArcHover((d: object | null) => {
       const next = d ? arcKey(d as Arc) : null;
@@ -448,23 +445,38 @@ export function initGlobe(container: HTMLElement) {
     .pathPointLng("lng")
     .pathPointAlt("altitude")
     .pathColor("color")
-    .pathStroke((d: object) => (d as PulsePath).stroke)
+    .pathStroke(pathStroke)
     .pathDashLength((d: object) => (d as PulsePath).dashLength)
     .pathDashGap((d: object) => (d as PulsePath).dashGap)
     .pathDashAnimateTime((d: object) => (d as PulsePath).duration)
     .pathTransitionDuration(0)
     .ringLat("lat")
     .ringLng("lng")
-    .ringColor(() => (time: number) => `rgba(94,234,212,${Math.max(0, 0.42 - time * 0.34)})`)
-    .ringMaxRadius(3.2)
-    .ringPropagationSpeed(1.25)
-    .ringRepeatPeriod(1800);
+    .ringColor((d: object) => {
+      const ring = d as ActivityRing;
+      return (time: number) => ring.kind === "origin"
+        ? `rgba(125,211,199,${Math.max(0, 0.3 * (1 - time))})`
+        : withAlpha(ring.color ?? "#e0a86a", Math.max(0, 0.46 * (1 - time)));
+    })
+    .ringMaxRadius(ringMaxRadius)
+    .ringPropagationSpeed(ringPropagationSpeed)
+    .ringRepeatPeriod((d: object) => (d as ActivityRing).kind === "origin" ? 2100 : 0)
+    .customLayerLabel((d: object) => hopTooltip(d as Point))
+    .onCustomLayerClick((d: object) => selectPoint(d as Point))
+    .onCustomLayerHover((d: object | null, previous: object | null) => {
+      setMarkerHovered(previous as Point | null, false);
+      setMarkerHovered(d as Point | null, true);
+    })
+    .customThreeObject((d: object) => createMarkerObject(d as Point))
+    .customThreeObjectUpdate((object: THREE.Object3D, d: object) => {
+      updateMarkerObject(object as THREE.Group, d as Point);
+    });
 
   const controls = globe.controls();
   controls.autoRotate = false;
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.minDistance = 120;
+  controls.minDistance = 106;
   controls.maxDistance = 800;
   // Zoom only the camera (three.js), not the page
   controls.enableZoom = true;
@@ -477,6 +489,7 @@ export function initGlobe(container: HTMLElement) {
     cancelPulse();
   };
   controls.addEventListener("start", markMoved);
+  controls.addEventListener("change", scheduleZoomRefresh);
   controls.addEventListener("end", () => {
     cameraInteracting = false;
     scheduleAmbientPulse();
@@ -498,11 +511,36 @@ export function initGlobe(container: HTMLElement) {
   });
 
   globe.pointOfView({ lat: 30, lng: -40, altitude: 1.9 }, 0);
+  refreshCameraScale();
 
   resizeGlobe(container);
   const ro = new ResizeObserver(() => resizeGlobe(container));
   ro.observe(container);
   return globe;
+}
+
+function selectPoint(point: Point) {
+  if (point.isOrigin) {
+    if (currentOrigin) onOriginClick?.(currentOrigin);
+    return;
+  }
+  const routes = [...new Map(
+    point.through.map((route) => [route.pathId, route]),
+  ).values()];
+  onHopClick?.({
+    lat: point.lat,
+    lon: point.lng,
+    city: point.city,
+    country: point.country,
+    addr: point.addr,
+    hostname: point.hostname,
+    asn: point.asn,
+    org: point.org,
+    geoSource: point.geoSource,
+    geoConfidence: point.geoConfidence,
+    geoNote: point.geoNote,
+    routes,
+  });
 }
 
 function preventPageZoom(container: HTMLElement) {
@@ -536,6 +574,213 @@ export function resizeGlobe(container: HTMLElement) {
     globe.width(width);
     globe.height(height);
   }
+}
+
+function pointRadius(d: object): number {
+  return (d as Point).size * cameraScale;
+}
+
+function pointAltitude(d: object): number {
+  const point = d as Point;
+  const altitude = point.isOrigin ? 0.022 : point.isDestination ? 0.015 : 0.006;
+  return altitude * cameraScale;
+}
+
+function arcStroke(d: object): number {
+  const arc = d as Arc;
+  const stroke = isArcEmphasized(arc)
+    ? Math.max(0.72, arc.stroke * 1.7)
+    : Math.max(arc.dimmed ? 0.28 : 0.46, arc.stroke * 1.5);
+  return stroke * cameraScale;
+}
+
+function arcDashLength(d: object): number {
+  const arc = d as Arc;
+  return arc.kind === "unmapped" ? 0.075 : arc.active ? 0.13 : 0.1;
+}
+
+function arcDashGap(d: object): number {
+  const arc = d as Arc;
+  return arc.kind === "unmapped" ? 0.045 : arc.active ? 0.055 : 0.065;
+}
+
+function arcDashAnimateTime(d: object): number {
+  const arc = d as Arc;
+  if (reduceMotion) return 0;
+  if (isArcEmphasized(arc)) return 8000;
+  if (arc.active) return 9000;
+  if (arc.kind === "unmapped") return 11000;
+  return arc.dimmed ? 15000 : 12000;
+}
+
+function pathStroke(d: object): number {
+  return (d as PulsePath).stroke * 1.45 * cameraScale;
+}
+
+function ringMaxRadius(d: object): number {
+  return ((d as ActivityRing).kind === "origin" ? 2.6 : 1.45) * cameraScale;
+}
+
+function ringPropagationSpeed(d: object): number {
+  return ((d as ActivityRing).kind === "origin" ? 1.1 : 1.8) * cameraScale;
+}
+
+function scheduleZoomRefresh() {
+  if (zoomRefreshFrame != null) return;
+  zoomRefreshFrame = requestAnimationFrame(() => {
+    zoomRefreshFrame = null;
+    refreshCameraScale();
+  });
+}
+
+function refreshCameraScale() {
+  if (!globe) return;
+  const altitude = Number(globe.pointOfView()?.altitude ?? 1.9);
+  const next = cameraCompensatedScale(altitude);
+  if (Math.abs(next - cameraScale) < 0.015) return;
+  cameraScale = next;
+  markerObjects.forEach(updateMarkerScale);
+  // Re-applying accessors refreshes only the affected Three.js layers. It
+  // avoids rebuilding route geometry on every camera frame.
+  globe
+    .pointRadius(pointRadius)
+    .pointAltitude(pointAltitude)
+    .arcStroke(arcStroke)
+    .pathStroke(pathStroke)
+    .ringMaxRadius(ringMaxRadius)
+    .ringPropagationSpeed(ringPropagationSpeed);
+  if (showLabels) {
+    globe
+      .labelSize(labelSize)
+      .labelAltitude(labelAltitude)
+      .labelDotRadius(labelDotRadius);
+  }
+  refreshVisibleLabels();
+}
+
+function createMarkerObject(point: Point): THREE.Group {
+  const group = new THREE.Group();
+  group.userData.isGlobeMarker = true;
+
+  const color = new THREE.Color(opaqueCssColor(markerCssColor(point)));
+  const opacity = markerOpacity(point);
+  const coreGeometry = point.isDestination
+    ? new THREE.OctahedronGeometry(0.38, 0)
+    : new THREE.SphereGeometry(point.isOrigin ? 0.34 : 0.3, 12, 8);
+  const core = new THREE.Mesh(
+    coreGeometry,
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity,
+      depthWrite: false,
+    }),
+  );
+  if (point.isDestination) core.rotation.z = Math.PI / 4;
+  group.add(core);
+
+  const halo = markerRing(color, point.isOrigin ? 0.56 : 0.5, point.isOrigin ? 0.68 : 0.61, opacity * 0.55);
+  group.add(halo);
+
+  if (point.isOrigin || point.isDestination || point.isLastMapped) {
+    const outer = markerRing(
+      color,
+      point.isOrigin ? 0.79 : 0.72,
+      point.isOrigin ? 0.84 : 0.77,
+      opacity * 0.28,
+    );
+    outer.rotation.z = point.isDestination ? Math.PI / 4 : 0;
+    group.add(outer);
+  }
+
+  updateMarkerObject(group, point);
+  return group;
+}
+
+function markerRing(
+  color: THREE.Color,
+  innerRadius: number,
+  outerRadius: number,
+  opacity: number,
+): THREE.Mesh {
+  return new THREE.Mesh(
+    new THREE.RingGeometry(innerRadius, outerRadius, 32),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+}
+
+function updateMarkerObject(group: THREE.Group, point: Point) {
+  if (!globe) return;
+  group.userData.point = point;
+  const altitude = point.isOrigin ? 0.006 : 0.0035;
+  const position = globe.getCoords(point.lat, point.lng, altitude * cameraScale);
+  group.position.set(position.x, position.y, position.z);
+  group.lookAt(0, 0, 0);
+  markerObjects.add(group);
+  updateMarkerScale(group);
+}
+
+function updateMarkerScale(group: THREE.Group) {
+  const point = group.userData.point as Point | undefined;
+  if (!point) return;
+  const hoverScale = group.userData.hovered === true ? 1.16 : 1;
+  const scale = point.size * 1.72 * cameraScale * hoverScale;
+  group.scale.setScalar(scale);
+}
+
+function setMarkerHovered(point: Point | null, hovered: boolean) {
+  if (!point) return;
+  for (const group of markerObjects) {
+    if (group.userData.point !== point) continue;
+    group.userData.hovered = hovered;
+    updateMarkerScale(group);
+    break;
+  }
+}
+
+function markerCssColor(point: Point): string {
+  if (point.isOrigin) return "#7dd3c7";
+  if (point.isDestination) return "#f9a8d4";
+  if (point.isLastMapped) return "#f2c66d";
+  if (point.dimmed) return "#788ca0";
+  return point.color;
+}
+
+function markerOpacity(point: Point): number {
+  if (point.dimmed) return 0.28;
+  const match = point.color.match(/rgba?\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\)/);
+  const sourceAlpha = match ? Number(match[1]) : 1;
+  return Math.max(0.42, Math.min(1, sourceAlpha));
+}
+
+function opaqueCssColor(color: string): string {
+  return color.replace(
+    /^rgba\(([^,]+,[^,]+,[^,]+),\s*[\d.]+\)$/,
+    "rgb($1)",
+  );
+}
+
+function disposeMarkerObjects() {
+  for (const group of markerObjects) {
+    group.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      mesh.geometry?.dispose();
+      const materials = Array.isArray(mesh.material)
+        ? mesh.material
+        : mesh.material
+          ? [mesh.material]
+          : [];
+      materials.forEach((material) => material.dispose());
+    });
+  }
+  markerObjects.clear();
 }
 
 export function setLabelsVisible(on: boolean) {
@@ -575,7 +820,7 @@ function hopTooltip(p: Point): string {
     const destLines = routes
       .slice(0, 8)
       .map((r) => {
-        const rtt = r.rttMs != null ? `${r.rttMs.toFixed(0)}ms` : "—";
+        const rtt = r.rttMs != null ? `${r.rttMs.toFixed(0)}ms` : "-";
         const star = r.isDestination ? " ★" : "";
         return `<div style="margin-left:14px;opacity:0.92">→ ${escapeHtml(prettyHost(r.host))} · hop ${r.ttl} · ${rtt}${star}</div>`;
       })
@@ -589,7 +834,7 @@ function hopTooltip(p: Point): string {
         <div style="display:flex;align-items:center;gap:6px">
           <span style="width:8px;height:8px;border-radius:50%;background:${color};box-shadow:0 0 8px ${color}"></span>
           <b style="color:${color}">${escapeHtml(app)}</b>
-          <span style="opacity:0.65;font-size:11px">${routes.length} path${routes.length > 1 ? "s" : ""}</span>
+          <span style="opacity:0.65;font-size:14px">${routes.length} path${routes.length > 1 ? "s" : ""}</span>
         </div>
         ${destLines}${more}
       </div>`);
@@ -597,7 +842,7 @@ function hopTooltip(p: Point): string {
 
   const addr = p.hostname || p.addr || "";
   const addrLine = addr
-    ? `<div style="opacity:0.7;font-family:ui-monospace,monospace;font-size:11px;margin-top:2px">${escapeHtml(addr)}</div>`
+    ? `<div style="opacity:0.7;font-family:ui-monospace,monospace;font-size:14px;margin-top:2px">${escapeHtml(addr)}</div>`
     : "";
   const network = p.org
     ? `<div style="opacity:0.78;margin-top:3px">${escapeHtml(p.org)}${p.asn ? ` · AS${p.asn}` : ""}</div>`
@@ -610,11 +855,11 @@ function hopTooltip(p: Point): string {
     ? `<div style="color:#f2c66d;opacity:0.78;margin-top:3px">${escapeHtml(p.geoNote)}</div>`
     : "";
 
-  return `<div style="font-family:system-ui;font-size:12px;line-height:1.4;padding:4px 2px;max-width:280px">
+  return `<div style="font-family:'IBM Plex Mono','Cascadia Mono','SFMono-Regular',monospace;font-size:16px;line-height:1.5;padding:8px 4px;max-width:420px">
     <div>${kind}</div>
     <div style="margin-top:4px;font-weight:600">${escapeHtml(city)}</div>
     ${addrLine}${network}${evidence}${note}
-    <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.12);font-size:11px;opacity:0.7">
+    <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.12);font-size:14px;opacity:0.7">
       Network topology, not a physical cable path · click to inspect
     </div>
     ${appBlocks.join("") || `<div style="opacity:0.6;margin-top:4px">No path data</div>`}
@@ -630,16 +875,16 @@ function originTooltip(origin: NetworkOrigin | null): string {
   const network = exit.organization
     ? `${exit.organization}${exit.asn ? ` · AS${exit.asn}` : ""}`
     : "Network provider unavailable";
-  return `<div style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.45;padding:5px 3px;max-width:280px">
-    <div style="color:#7dd3c7;font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:10px">Primary network exit</div>
+  return `<div style="font-family:'IBM Plex Mono','Cascadia Mono','SFMono-Regular',monospace;font-size:16px;line-height:1.5;padding:8px 4px;max-width:420px">
+    <div style="color:#7dd3c7;font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:14px">Primary network exit</div>
     <div style="margin-top:5px;font-weight:650">${escapeHtml(place)}</div>
     <div style="opacity:.78;margin-top:2px">${escapeHtml(network)}</div>
     ${exit.ip ? `<div style="opacity:.62;margin-top:2px">${escapeHtml(exit.ip)}</div>` : ""}
-    <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.12);opacity:.68;font-size:11px">Where the public internet sees this connection · click for evidence</div>
+    <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.12);opacity:.68;font-size:14px">Where the public internet sees this connection · click for evidence</div>
   </div>`;
 }
 
-/** Short readable host for UI — drop PTR junk and ultra-long labels. */
+/** Short readable host for UI; drop PTR junk and ultra-long labels. */
 export function prettyHost(host: string): string {
   let h = host.trim();
   if (!h) return host;
@@ -685,8 +930,12 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
   hopCount: number;
   destCount: number;
 } {
+  const hopReveal = detectNewHopReveal(paths);
   currentPaths = paths;
-  scheduleAmbientPulse();
+  const activityPath = detectRouteActivity(paths);
+  if (hopReveal) scheduleHopReveal(hopReveal);
+  else if (activityPath) scheduleActivityPulse(activityPath);
+  else scheduleAmbientPulse();
   if (!globe) return { pathCount: 0, hopCount: 0, destCount: 0 };
 
   const pathCount = paths.filter((p) => p.hops.some((h) => h.lat != null)).length;
@@ -716,6 +965,7 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
     const dimmed = selectedPathId
       ? path.id !== selectedPathId
       : focusedApps.size > 0 && !focusedApps.has(path.appId);
+    const active = selectedPathId === path.id || focusedApps.has(path.appId);
     const located = path.hops.filter(
       (h) =>
         h.lat != null &&
@@ -760,7 +1010,7 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
         existing.through.push(through);
         if (isEnd) {
           existing.isDestination = true;
-          existing.size = Math.max(existing.size, 0.5);
+          existing.size = Math.max(existing.size, 0.55);
           if (!dimmed) {
             existing.color = "#f9a8d4";
             existing.label = labelForDestination(path, h);
@@ -768,7 +1018,7 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
         }
         if (isLastMapped && !path.reachedTarget && !existing.isDestination) {
           existing.isLastMapped = true;
-          existing.size = Math.max(existing.size, 0.3);
+          existing.size = Math.max(existing.size, 0.35);
           if (!dimmed) existing.color = "#f2c66d";
         }
         if (!dimmed) existing.dimmed = false;
@@ -803,7 +1053,7 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
           label: isEnd
             ? labelForDestination(path, h)
             : h.city || "",
-          size: isEnd ? 0.5 : i === 0 ? 0.28 : 0.16,
+          size: isEnd ? 0.55 : i === 0 ? 0.32 : 0.2,
           color: dimmed
             ? "rgba(120,140,160,0.25)"
             : isEnd
@@ -832,7 +1082,16 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
       const b = arcHops[i + 1];
       const isLastArc = i === arcHops.length - 2;
       const bIsTarget = path.reachedTarget && b.addr === path.ip;
+      if (!segmentHasVisibleDistance(
+        a.lat as number,
+        a.lon as number,
+        b.lat as number,
+        b.lon as number,
+      )) continue;
       const segment = classifySegment(path.hops, a.ttl, b.ttl);
+      const brightColor = bIsTarget
+        ? [path.color, "#f9a8d4"]
+        : [path.color, lighten(path.color, 0.15)];
       arcs.push({
         startLat: a.lat as number,
         startLng: a.lon as number,
@@ -840,14 +1099,25 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
         endLng: b.lon as number,
         color: dimmed
           ? ["rgba(100,120,140,0.08)", "rgba(100,120,140,0.04)"]
-          : bIsTarget
-            ? [path.color, "#f9a8d4"]
-            : [path.color, lighten(path.color, 0.15)],
+          : brightColor.map((color, index) => withAlpha(
+              color,
+              active
+                ? (index === 0 ? 0.85 : 0.95)
+                : (index === 0 ? 0.5 : 0.7),
+            )),
+        brightColor,
         pathId: path.id,
         app: path.app,
         host: path.host,
         dimmed,
-        stroke: dimmed ? 0.12 : bIsTarget ? 0.55 : isLastArc ? 0.42 : 0.35,
+        active,
+        stroke: dimmed
+          ? 0.16
+          : active
+            ? (bIsTarget ? 0.58 : 0.46)
+            : isLastArc
+              ? 0.38
+              : 0.3,
         fromTtl: a.ttl,
         toTtl: b.ttl,
         traceStatus: path.status,
@@ -863,7 +1133,7 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
       return {
         ...p,
         color: withAlpha("#f9a8d4", alpha),
-        size: Math.max(p.size, 0.5),
+        size: Math.max(p.size, 0.55),
       };
     }
     if (p.isLastMapped) {
@@ -871,12 +1141,12 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
       return {
         ...p,
         color: withAlpha("#f2c66d", alpha),
-        size: Math.max(p.size, 0.3),
+        size: Math.max(p.size, 0.35),
       };
     }
     const uniqueApps = new Set(p.through.map((t) => t.app));
     if (uniqueApps.size > 1) {
-      return { ...p, color: "#cbd5e1", size: Math.max(p.size, 0.24) };
+      return { ...p, color: "#cbd5e1", size: Math.max(p.size, 0.28) };
     }
     const alpha = confidenceAlpha(p.geoConfidence);
     return alpha < 1 ? { ...p, color: withAlpha(p.color, alpha) } : p;
@@ -892,7 +1162,7 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
       if (!highlighted) return point;
       return {
         ...point,
-        size: Math.max(point.size * 1.55, 0.34),
+        size: Math.max(point.size * 1.32, 0.4),
         color: point.isDestination ? "#f9a8d4" : "#f4e3b2",
       };
     });
@@ -919,7 +1189,7 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
       lat: originExit.lat as number,
       lng: originExit.lon as number,
       label: "Primary network exit",
-      size: 0.62,
+      size: 0.65,
       color: "#7dd3c7",
       isDestination: false,
       isLastMapped: false,
@@ -943,15 +1213,16 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
 
   // Only push new arrays when geometry actually changed (lastKey already gates this)
   globe.pointsData(points);
+  globe.customLayerData([]);
+  disposeMarkerObjects();
+  globe.customLayerData(points);
   globe.arcsData(arcs);
-  globe.ringsData(
-    originPoint && !reduceMotion
-      ? ([{ lat: originPoint.lat, lng: originPoint.lng }] satisfies OriginRing[])
-      : [],
-  );
+  originRing = originPoint && !reduceMotion
+    ? { lat: originPoint.lat, lng: originPoint.lng, kind: "origin" }
+    : null;
+  setActivityRings();
 
   if ((showLabels || selectedPathId || hoveredSegmentKey) && points.length > 0) {
-    const labels: Array<Point | GapLabel> = showLabels ? pickLabels(points) : [];
     const gapLabels = arcs
       .filter(
         (arc) =>
@@ -960,21 +1231,17 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
             selectedPathId === arc.pathId),
       )
       .map(gapLabelForArc);
-    labels.push(...gapLabels);
+    currentLabelPoints = points;
+    currentGapLabels = gapLabels;
+    const labels = pickLabels(showLabels ? points : [], gapLabels);
     globe
       .labelsData(labels)
       .labelLat("lat")
       .labelLng("lng")
       .labelText("label")
-      // Globe labels use angular units, so values around 1 become enormous
-      // when the camera frames a dense metro area. Keep them secondary to
-      // the nodes and routes they describe.
-      .labelSize((d: object) => {
-        if (isGapLabel(d)) return 0.46;
-        const point = d as Point;
-        return point.isOrigin ? 0.44 : point.isDestination ? 0.48 : 0.34;
-      })
-      .labelDotRadius((d: object) => (isGapLabel(d) ? 0.24 : 0))
+      .labelTypeFace(optimerTypeface)
+      .labelSize(labelSize)
+      .labelDotRadius(labelDotRadius)
       .labelColor((d: object) =>
         isGapLabel(d)
           ? "rgba(242,198,109,0.96)"
@@ -982,22 +1249,24 @@ export function updateAllPaths(paths: GlobePath[], origin: NetworkOrigin | null 
           ? "rgba(125,211,199,0.94)"
           : (d as Point).isDestination
           ? "rgba(249,168,212,0.84)"
-          : "rgba(226,232,240,0.58)",
+          : "rgba(226,232,240,0.78)",
       )
-      .labelAltitude((d: object) => (isGapLabel(d) ? (d as GapLabel).altitude : 0.018))
-      .labelResolution(3);
+      .labelAltitude(labelAltitude)
+      .labelResolution(4);
   } else {
+    currentLabelPoints = points;
+    currentGapLabels = [];
     globe.labelsData([]);
   }
 
-  // Auto-frame once when data first appears / bounds jump a lot — never fight the user
+  // Auto-frame once when data first appears / bounds jump a lot; never fight the user
   maybeFrameCamera(allLats, allLngs);
 
   return { pathCount, hopCount, destCount };
 }
 
 function labelForDestination(path: GlobePath, hop: GlobeHop): string {
-  // Prefer human city — never dump reverse-DNS spaghetti on the globe
+  // Prefer human city; never dump reverse-DNS spaghetti on the globe
   if (hop.city) return hop.city;
   const host = prettyHost(path.host);
   // Skip if it still looks like an IP
@@ -1053,7 +1322,7 @@ function segmentTooltip(arc: Arc): string {
   if (!arc.dimmed && gapShouldAnimate(arc.kind, arc.traceStatus, reduceMotion)) {
     details += " · traceroute in progress";
   }
-  return `<div style="font-family:ui-monospace,monospace;font-size:11px;line-height:1.45;padding:4px 2px;max-width:270px">
+  return `<div style="font-family:'IBM Plex Mono','Cascadia Mono','SFMono-Regular',monospace;font-size:16px;line-height:1.5;padding:8px 4px;max-width:420px">
     <div style="color:${selection.kind === "unmapped" ? "#f2c66d" : "#e8e3d8"};font-weight:700">${title} · hop ${selection.fromTtl} → ${selection.toTtl}</div>
     <div style="margin-top:3px;opacity:.72">${escapeHtml(selection.app)} → ${escapeHtml(prettyHost(selection.host))}</div>
     <div style="margin-top:5px;opacity:.62">${details} · click to inspect</div>
@@ -1075,6 +1344,34 @@ function gapLabelForArc(arc: Arc): GapLabel {
 
 function isGapLabel(value: object): value is GapLabel {
   return (value as Partial<GapLabel>).isGapLabel === true;
+}
+
+function labelBaseSize(d: object): number {
+  return isGapLabel(d)
+    ? 1.12
+    : (d as Point).isOrigin
+      ? 1.04
+      : (d as Point).isDestination
+        ? 1.17
+        : 0.9;
+}
+
+function labelSize(d: object): number {
+  return labelBaseSize(d) * cameraScale;
+}
+
+function labelAltitude(d: object): number {
+  const base = isGapLabel(d) ? (d as GapLabel).altitude : 0.022;
+  return base * cameraScale;
+}
+
+function labelDotRadius(d: object): number {
+  return (isGapLabel(d) ? 0.28 : 0) * cameraScale;
+}
+
+function setActivityRings() {
+  if (!globe) return;
+  globe.ringsData([originRing, arrivalRing].filter(Boolean) as ActivityRing[]);
 }
 
 function confidenceLabel(score: number | null): string {
@@ -1111,106 +1408,51 @@ function locKey(lat: number, lon: number): string {
   return `${lat.toFixed(2)},${lon.toFixed(2)}`;
 }
 
-function pickLabels(points: Point[]): Point[] {
-  // Labels are decoration; nodes remain visible, hoverable, and clickable.
-  // Rank useful candidates, then reserve geographic space for each accepted
-  // label. This handles both duplicate city names and different names inside
-  // one metro area (for example São Paulo + Guarulhos).
-  const maxLabels = points.length > 80 ? 10 : points.length > 35 ? 12 : 16;
-  const maxTransitLabels = 4;
-  const bestByName = new Map<string, Point>();
-
-  for (const point of points) {
-    if (point.dimmed) continue;
-
-    const label = point.isOrigin
-      ? point.label
-      : point.isDestination
-        ? point.label
-        : point.city || "";
-    if (!label || isNoisyLabel(label)) continue;
-
-    const candidate = label === point.label ? point : { ...point, label };
-    const key = normalizeLabel(label);
-    const existing = bestByName.get(key);
-    if (!existing || labelPriority(candidate) > labelPriority(existing)) {
-      bestByName.set(key, candidate);
-    }
-  }
-
-  const candidates = [...bestByName.values()].sort(
-    (a, b) => labelPriority(b) - labelPriority(a),
-  );
-  const accepted: Point[] = [];
-  let transitLabels = 0;
-
-  for (const candidate of candidates) {
-    if (!candidate.isDestination && transitLabels >= maxTransitLabels) continue;
-    if (accepted.some((placed) => labelsCollide(candidate, placed))) continue;
-
-    accepted.push(candidate);
-    if (!candidate.isDestination) transitLabels += 1;
-    if (accepted.length >= maxLabels) break;
-  }
-
-  return accepted;
-}
-
-function labelPriority(point: Point): number {
-  const appCount = new Set(point.through.map((route) => route.app)).size;
-  const destinationRoutes = point.through.filter(
-    (route) => route.isDestination,
-  ).length;
-  // Destinations win, then shared network hubs, then route volume. Prefer a
-  // concise name in a tie because it occupies less map space.
-  return (
-    (point.isOrigin ? 20_000 : point.isDestination ? 10_000 : 0) +
-    destinationRoutes * 100 +
-    appCount * 20 +
-    point.through.length -
-    point.label.length * 0.05
-  );
-}
-
-function normalizeLabel(label: string): string {
-  return label
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLocaleLowerCase()
-    .replace(/[^a-z0-9]/g, "");
-}
-
-function labelsCollide(a: Point, b: Point): boolean {
-  // Approximate each label's footprint in angular map space. Longitude
-  // degrees contract toward the poles, hence the cosine correction.
-  const midLat = ((a.lat + b.lat) / 2) * (Math.PI / 180);
-  const dx =
-    Math.abs(wrappedLongitudeDelta(a.lng, b.lng)) *
-    Math.max(0.28, Math.cos(midLat));
-  const dy = Math.abs(a.lat - b.lat);
-  const halfWidth =
-    (labelAngularWidth(a.label) + labelAngularWidth(b.label)) / 2;
-
-  return dx < halfWidth + 1.2 && dy < 2.6;
-}
-
-function labelAngularWidth(label: string): number {
-  return Math.min(9, Math.max(3, label.length * 0.34 + 1.4));
-}
-
 function wrappedLongitudeDelta(a: number, b: number): number {
   const direct = Math.abs(a - b) % 360;
   return Math.min(direct, 360 - direct);
 }
 
-function isNoisyLabel(s: string): boolean {
-  if (!s || s.length < 2) return true;
-  if (/^\d/.test(s)) return true;
-  if (s.includes(":") && s.split(":").length > 2) return true;
-  // Mostly hex / random
-  if (/^[0-9a-f.-]{10,}$/i.test(s)) return true;
-  if ((s.match(/\d/g) || []).length > s.length * 0.4) return true;
-  return false;
+function pickLabels(
+  points: Point[],
+  gapLabels: GapLabel[] = [],
+): Array<Point | GapLabel> {
+  const labeledPoints = points.map((point) => {
+    if (point.isOrigin || point.isDestination) return point;
+    const ttl = Math.min(...point.through.map((route) => route.ttl));
+    const label = point.city || point.hostname || point.addr || `Hop ${ttl}`;
+    return label === point.label ? point : { ...point, label };
+  });
+  const candidates = [...labeledPoints, ...gapLabels].map((label, index) => ({
+    ...label,
+    size: labelBaseSize(label) * cameraScale,
+    priority:
+      labelPriority(label) +
+      (labeledPoints.length + gapLabels.length - index) * 0.0001,
+  }));
+  return selectNonOverlappingLabels(candidates);
+}
+
+function labelPriority(label: Point | GapLabel): number {
+  if (isGapLabel(label)) return 600;
+  const visibilityPriority = label.dimmed ? -1_000 : 0;
+  if (label.isOrigin) return visibilityPriority + 500;
+  if (label.isDestination) return visibilityPriority + 400;
+  if (label.isLastMapped) return visibilityPriority + 300;
+  const appCount = new Set(label.through.map((route) => route.app)).size;
+  return visibilityPriority + (appCount > 1 ? 200 + appCount : 100 + label.through.length);
+}
+
+function refreshVisibleLabels() {
+  if (
+    !globe ||
+    (currentLabelPoints.length === 0 && currentGapLabels.length === 0)
+  ) {
+    return;
+  }
+  globe.labelsData(
+    pickLabels(showLabels ? currentLabelPoints : [], currentGapLabels),
+  );
 }
 
 type Vector3 = { x: number; y: number; z: number };
@@ -1273,38 +1515,131 @@ function cancelPulse() {
   motionRun += 1;
   if (pulseTimer) clearTimeout(pulseTimer);
   if (pulseClearTimer) clearTimeout(pulseClearTimer);
+  if (pulseArrivalTimer) clearTimeout(pulseArrivalTimer);
+  if (arrivalClearTimer) clearTimeout(arrivalClearTimer);
   pulseTimer = null;
   pulseClearTimer = null;
+  pulseArrivalTimer = null;
+  arrivalClearTimer = null;
+  arrivalRing = null;
+  setActivityRings();
   globe?.pathsData([]);
 }
 
-function playPathPreview(path: GlobePath, tone: PulsePath["tone"]) {
+function playPathPreview(
+  path: GlobePath,
+  tone: PulsePath["tone"],
+  pointsOverride?: PulsePoint[],
+) {
   pulseTimer = null;
   if (!globe || reduceMotion || document.hidden || cameraInteracting) return;
   if (tone === "selected" && selectedPathId !== path.id) return;
-  const points = buildPulsePathPoints(path.hops);
+  const points = pointsOverride ?? buildPulsePathPoints(path.hops);
   if (points.length < 2) {
     scheduleAmbientPulse();
     return;
   }
   const run = motionRun;
   const selected = tone === "selected";
-  const duration = selected ? 1200 : 1600;
-  globe.pathsData([{
-    points,
-    color: selected ? "#fff0b7" : withAlpha(path.color, 0.55),
-    stroke: selected ? 0.72 : 0.42,
-    dashLength: selected ? 0.045 : 0.032,
-    dashGap: selected ? 0.955 : 0.968,
-    duration,
-    tone,
-  } satisfies PulsePath]);
+  const reveal = tone === "reveal";
+  const duration = reveal ? 900 : selected ? 1250 : 1500;
+  const paths: PulsePath[] = reveal
+    ? [
+        {
+          points,
+          color: withAlpha(path.color, 0.62),
+          stroke: 0.56,
+          dashLength: 0.12,
+          dashGap: 0.88,
+          duration,
+          tone,
+        },
+        {
+          points,
+          color: "#fff4c7",
+          stroke: 0.7,
+          dashLength: 0.026,
+          dashGap: 0.974,
+          duration,
+          tone,
+        },
+      ]
+    : [{
+        points,
+        color: selected ? "#fff0b7" : withAlpha(path.color, 0.55),
+        stroke: selected ? 0.58 : 0.34,
+        dashLength: selected ? 0.026 : 0.02,
+        dashGap: selected ? 0.3 : 0.48,
+        duration,
+        tone,
+      }];
+  globe.pathsData(paths);
+  const terminal = points.at(-1);
+  if (terminal) {
+    pulseArrivalTimer = setTimeout(() => {
+      if (run !== motionRun) return;
+      pulseArrivalTimer = null;
+      arrivalRing = {
+        lat: terminal.lat,
+        lng: terminal.lng,
+        kind: "arrival",
+        color: reveal ? "#fff4c7" : selected ? "#fff0b7" : path.color,
+      };
+      setActivityRings();
+      arrivalClearTimer = setTimeout(() => {
+        if (run !== motionRun) return;
+        arrivalRing = null;
+        arrivalClearTimer = null;
+        setActivityRings();
+      }, 950);
+    }, Math.round(duration * 0.82));
+  }
   pulseClearTimer = setTimeout(() => {
     if (run !== motionRun) return;
     globe?.pathsData([]);
     pulseClearTimer = null;
     scheduleAmbientPulse();
   }, duration);
+}
+
+type HopReveal = {
+  pathId: string;
+  points: PulsePoint[];
+};
+
+function detectNewHopReveal(paths: GlobePath[]): HopReveal | null {
+  let reveal: HopReveal | null = null;
+  if (hasHopBaseline) {
+    for (const path of paths) {
+      const points = buildNewHopPulsePath(
+        previousPathHops.get(path.id) ?? [],
+        path.hops,
+      );
+      if (points.length >= 2) reveal = { pathId: path.id, points };
+    }
+  }
+  previousPathHops = new Map(
+    paths.map((path) => [path.id, path.hops.map((hop) => ({ ...hop }))]),
+  );
+  hasHopBaseline = true;
+  return reveal;
+}
+
+function scheduleHopReveal(reveal: HopReveal) {
+  if (!globe || !ambientMotionAllowed(reduceMotion, document.hidden, cameraInteracting)) {
+    return;
+  }
+  // Newly mapped geometry is more useful than an ambient pass. Retarget the
+  // packet immediately if another hop arrives while the last one is moving.
+  cancelPulse();
+  const run = motionRun;
+  pulseTimer = setTimeout(() => {
+    if (run !== motionRun) return;
+    pulseTimer = null;
+    const path = currentPaths.find((candidate) => candidate.id === reveal.pathId);
+    if (path) playPathPreview(path, "reveal", reveal.points);
+    else scheduleAmbientPulse();
+  }, 90);
 }
 
 function scheduleAmbientPulse(delay = ambientDelay()) {
@@ -1352,8 +1687,57 @@ function scheduleAmbientPulse(delay = ambientDelay()) {
   }, delay);
 }
 
+function detectRouteActivity(paths: GlobePath[]): GlobePath | null {
+  const hadBaseline = previousPathHits.size > 0;
+  const eligibleIds = new Set(ambientRouteCandidates(
+    paths.map((path) => ({
+      id: path.id,
+      appId: path.appId,
+      mappedHopCount: path.hops.filter(isLocated).length,
+    })),
+    selectedPathId,
+    focusedApps,
+  ).map((path) => path.id));
+  let best: { path: GlobePath; delta: number } | null = null;
+
+  for (const path of paths) {
+    const previous = previousPathHits.get(path.id);
+    const delta = previous == null
+      ? (hadBaseline ? path.hits : 0)
+      : Math.max(0, path.hits - previous);
+    if (delta > 0 && eligibleIds.has(path.id) && (!best || delta > best.delta)) {
+      best = { path, delta };
+    }
+  }
+  previousPathHits = new Map(paths.map((path) => [path.id, path.hits]));
+  return best?.path ?? null;
+}
+
+function scheduleActivityPulse(path: GlobePath) {
+  if (
+    !globe ||
+    pulseClearTimer ||
+    !ambientMotionAllowed(reduceMotion, document.hidden, cameraInteracting)
+  ) {
+    return;
+  }
+  if (pulseTimer) clearTimeout(pulseTimer);
+  const run = motionRun;
+  pulseTimer = setTimeout(() => {
+    if (run !== motionRun) return;
+    pulseTimer = null;
+    const current = currentPaths.find((candidate) => candidate.id === path.id);
+    if (current) {
+      lastAmbientPathId = current.id;
+      playPathPreview(current, selectedPathId === current.id ? "selected" : "ambient");
+    } else {
+      scheduleAmbientPulse();
+    }
+  }, 180);
+}
+
 function ambientDelay(): number {
-  return 4000 + Math.round(Math.random() * 3000);
+  return 1800 + Math.round(Math.random() * 1800);
 }
 
 function framePath(path: GlobePath, duration: number) {
@@ -1419,14 +1803,23 @@ function escapeHtml(s: string): string {
 
 export function clearGlobe() {
   cancelPulse();
+  originRing = null;
+  arrivalRing = null;
   lastKey = "";
   lastFrameBounds = null;
   hasUserMovedCamera = false;
   currentPaths = [];
+  currentLabelPoints = [];
+  currentGapLabels = [];
+  previousPathHits.clear();
+  previousPathHops.clear();
+  hasHopBaseline = false;
   hoveredSegmentKey = null;
   highlightedHop = null;
   if (!globe) return;
   globe.pointsData([]);
+  globe.customLayerData([]);
+  disposeMarkerObjects();
   globe.arcsData([]);
   globe.pathsData([]);
   globe.labelsData([]);

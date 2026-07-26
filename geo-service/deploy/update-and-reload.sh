@@ -57,5 +57,5 @@ if [[ -n "$TOKEN" ]]; then
     "${LISTEN_HOST}" >/dev/null
   echo "Reloaded geo service readers"
 else
-  echo "GEO_SERVICE_TOKEN unset — databases updated; restart mapmy-geo manually"
+  echo "GEO_SERVICE_TOKEN unset; databases updated; restart mapmy-geo manually"
 fi

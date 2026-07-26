@@ -81,7 +81,7 @@ fn path_fingerprint(hops: &[Hop], geo: &GeoCache) -> u64 {
                 0u8.hash(&mut hasher);
             }
         }
-        // quantize rtt to 5ms buckets — avoid thrash
+        // quantize rtt to 5ms buckets to avoid thrash
         let rtt_bucket = h.rtt_ms.map(|ms| (ms / 5.0) as i32).unwrap_or(-1);
         rtt_bucket.hash(&mut hasher);
     }

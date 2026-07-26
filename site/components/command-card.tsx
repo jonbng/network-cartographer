@@ -30,6 +30,8 @@ export function CommandCard() {
 
   return (
     <div className="run-block" id="run">
+      <p className="run-heading">Run this command to launch the live map</p>
+
       <div className="run-tabs" role="tablist" aria-label="Operating system">
         <button
           className={`run-tab${platform === "unix" ? " active" : ""}`}
@@ -67,7 +69,7 @@ export function CommandCard() {
       </div>
 
       <p className="run-note">
-        Checksummed binary · runs locally · exits when you quit
+        Paste it into your terminal. The app runs locally and opens in your browser.
       </p>
     </div>
   );

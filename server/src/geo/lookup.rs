@@ -224,7 +224,7 @@ impl GeoCache {
         if lat == 0.0 && lon == 0.0 {
             return None;
         }
-        // No city name → country-level only (often "center of US") — skip
+        // No city name → country-level only (often "center of US"); skip
         let city = rec
             .city
             .as_ref()
@@ -269,7 +269,7 @@ pub fn is_usable_city_hint(h: &GeoHint) -> bool {
 
 /// Well-known GeoIP country/continent fallbacks (not real cities).
 fn is_default_geo_coordinate(lat: f64, lon: f64) -> bool {
-    // (lat, lon, radius_km) — MaxMind & others park "US unknown" near Kansas
+    // (lat, lon, radius_km): MaxMind & others park "US unknown" near Kansas
     const DEFAULTS: &[(f64, f64, f64)] = &[
         (37.751, -97.822, 40.0),   // MaxMind US default
         (39.76, -98.5, 80.0),      // geographic center US-ish

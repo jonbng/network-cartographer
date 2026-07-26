@@ -12,11 +12,11 @@ use std::io::{self, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GfxBackend {
-    /// Kitty / Ghostty — real pixels via graphics protocol.
+    /// Kitty / Ghostty: real pixels via graphics protocol.
     Kitty,
-    /// Unicode Braille (U+2800) — 2×4 dots per cell (~4× halfblocks).
+    /// Unicode Braille (U+2800): 2×4 dots per cell (~4× halfblocks).
     Braille,
-    /// ▀ half-blocks — 1×2 “pixels” per cell.
+    /// ▀ half-blocks: 1×2 “pixels” per cell.
     Halfblocks,
 }
 

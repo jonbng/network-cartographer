@@ -39,7 +39,7 @@ export async function mountHeroGlobe(
     .showAtmosphere(true)
     .atmosphereColor("#e0a86a")
     .atmosphereAltitude(0.18)
-    .globeImageUrl("/earth-dark.jpg")
+    .globeImageUrl("/earth-dark.webp")
     .pointAltitude((d: object) => ((d as Point).isDestination ? 0.02 : 0.01))
     .pointRadius("size")
     .pointColor("color")

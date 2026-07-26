@@ -15,7 +15,6 @@ pub struct AppState {
     apps: HashMap<String, AppEntry>,
     unattributed: AppEntry,
     pub retain: Duration,
-    pub external_only: bool,
     pub include_udp: bool,
     pub missing_pid_count: usize,
     pub last_poll_at: Option<Instant>,
@@ -27,7 +26,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(retain: Duration, external_only: bool, include_udp: bool) -> Self {
+    pub fn new(retain: Duration, include_udp: bool) -> Self {
         Self {
             apps: HashMap::new(),
             unattributed: empty_entry(
@@ -37,7 +36,6 @@ impl AppState {
                 Instant::now(),
             ),
             retain,
-            external_only,
             include_udp,
             missing_pid_count: 0,
             last_poll_at: None,
@@ -105,7 +103,7 @@ impl AppState {
             if conn.remote.ip().is_unspecified() || conn.remote.port() == 0 {
                 continue;
             }
-            if self.external_only && is_local_or_private(conn.remote.ip()) {
+            if is_local_or_private(conn.remote.ip()) {
                 continue;
             }
             if active {
@@ -493,7 +491,7 @@ mod tests {
 
     #[test]
     fn repeated_socket_observations_count_once() {
-        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut state = AppState::new(Duration::from_secs(45), false);
         let mut hostnames = HostnameCache::new();
         state.ingest(
             vec![connection(AttributionSource::Direct, true)],
@@ -512,7 +510,7 @@ mod tests {
 
     #[test]
     fn recovered_owner_stays_with_application() {
-        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut state = AppState::new(Duration::from_secs(45), false);
         let mut hostnames = HostnameCache::new();
         state.ingest(
             vec![connection(AttributionSource::Recovered, false)],
@@ -525,8 +523,21 @@ mod tests {
     }
 
     #[test]
+    fn local_destinations_are_always_hidden() {
+        let mut state = AppState::new(Duration::from_secs(45), false);
+        let mut hostnames = HostnameCache::new();
+        let mut observation = connection(AttributionSource::Direct, true);
+        observation.connection.remote = "192.168.1.1:443".parse().unwrap();
+
+        state.ingest(vec![observation], &mut hostnames);
+
+        assert_eq!(state.app_count(), 0);
+        assert_eq!(state.last_raw_connections, 0);
+    }
+
+    #[test]
     fn friendly_app_name_wins_over_executable_path() {
-        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut state = AppState::new(Duration::from_secs(45), false);
         let mut hostnames = HostnameCache::new();
         let mut observation = connection(AttributionSource::Direct, true);
         observation.connection.application_id = Some("linux-desktop:app.zen_browser.zen".into());
@@ -544,7 +555,7 @@ mod tests {
 
     #[test]
     fn unattributed_traffic_is_not_an_application() {
-        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut state = AppState::new(Duration::from_secs(45), false);
         let mut hostnames = HostnameCache::new();
         state.ingest(
             vec![connection(AttributionSource::Unattributed, true)],
@@ -560,7 +571,7 @@ mod tests {
 
     #[test]
     fn cumulative_socket_bytes_become_per_app_rates_without_initial_spike() {
-        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut state = AppState::new(Duration::from_secs(45), false);
         let mut hostnames = HostnameCache::new();
         let mut conn = connection(AttributionSource::Direct, true);
         conn.connection.traffic_counters = Some(SocketTrafficCounters {
@@ -585,7 +596,7 @@ mod tests {
 
     #[test]
     fn historical_observation_updates_hits_but_not_live_counts() {
-        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut state = AppState::new(Duration::from_secs(45), false);
         let mut hostnames = HostnameCache::new();
         let mut observation = connection(AttributionSource::Unattributed, true);
         observation.active = false;
@@ -600,7 +611,7 @@ mod tests {
 
     #[test]
     fn one_off_attributed_destination_is_deferred_but_retained() {
-        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut state = AppState::new(Duration::from_secs(45), false);
         let mut hostnames = HostnameCache::new();
         state.ingest(
             vec![connection(AttributionSource::Direct, true)],
@@ -616,7 +627,7 @@ mod tests {
 
     #[test]
     fn persistent_socket_qualifies_on_second_live_observation() {
-        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut state = AppState::new(Duration::from_secs(45), false);
         let mut hostnames = HostnameCache::new();
         let first = connection(AttributionSource::Direct, true);
         let mut second = first.clone();
@@ -634,7 +645,7 @@ mod tests {
 
     #[test]
     fn repeated_short_connections_qualify_by_remote_ip() {
-        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut state = AppState::new(Duration::from_secs(45), false);
         let mut hostnames = HostnameCache::new();
         let mut first = connection(AttributionSource::Direct, true);
         first.active = false;
@@ -653,7 +664,7 @@ mod tests {
 
     #[test]
     fn udp_only_destination_remains_deferred_despite_repeated_evidence() {
-        let mut state = AppState::new(Duration::from_secs(45), false, true);
+        let mut state = AppState::new(Duration::from_secs(45), true);
         let mut hostnames = HostnameCache::new();
         let mut first = connection(AttributionSource::Direct, true);
         first.connection.protocol = Protocol::Udp;
@@ -675,7 +686,7 @@ mod tests {
 
     #[test]
     fn unattributed_observations_never_supply_auto_trace_evidence() {
-        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut state = AppState::new(Duration::from_secs(45), false);
         let mut hostnames = HostnameCache::new();
         let first = connection(AttributionSource::Unattributed, true);
         let mut second = first.clone();

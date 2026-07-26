@@ -47,6 +47,7 @@ export function HeroGlobe() {
     <figure className="globe-block">
       <div className="globe-shell">
         <div className="globe-frame">
+          <span className="globe-demo-badge">Demo preview · sample data</span>
           {status !== "ready" && (
             <p className="globe-fallback" aria-live="polite">
               {status === "error"
@@ -81,7 +82,7 @@ export function HeroGlobe() {
         </aside>
       </div>
       <figcaption className="globe-caption">
-        Sample data, not your machine. Drag to orbit, scroll to zoom.
+        Interactive demo preview, not live data from your machine. Drag to orbit, scroll to zoom.
       </figcaption>
     </figure>
   );

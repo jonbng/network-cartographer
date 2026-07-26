@@ -261,17 +261,14 @@ impl App {
             Action::ToggleSetting(index) if self.overlay == Overlay::Settings => {
                 match index {
                     1 => {
-                        self.snapshot.settings.external_only = !self.snapshot.settings.external_only
-                    }
-                    2 => {
                         self.snapshot.settings.traces_enabled =
                             !self.snapshot.settings.traces_enabled
                     }
-                    3 => {
+                    2 => {
                         self.snapshot.settings.geo_local_only =
                             !self.snapshot.settings.geo_local_only
                     }
-                    4 => {
+                    3 => {
                         self.snapshot.settings.history_enabled =
                             !self.snapshot.settings.history_enabled
                     }

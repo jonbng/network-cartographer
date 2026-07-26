@@ -260,7 +260,7 @@ fn row_item<'a>(app: &'a App, row: &RowRef) -> Option<ListItem<'a>> {
             let rtt = destination
                 .rtt_ms
                 .map(|value| format!("{value:.0}ms"))
-                .unwrap_or_else(|| "—".into());
+                .unwrap_or_else(|| "-".into());
             Some(ListItem::new(Line::from(vec![
                 Span::styled("  ★ ", Style::default().fg(DEST)),
                 Span::styled(&destination.host, Style::default().fg(TEXT)),
@@ -444,7 +444,7 @@ fn render_selection_detail(f: &mut Frame, app: &App, area: Rect) {
                     destination
                         .rtt_ms
                         .map(|rtt| format!("{rtt:.0}ms"))
-                        .unwrap_or_else(|| "—".into()),
+                        .unwrap_or_else(|| "-".into()),
                     destination.status,
                     destination.hits,
                     final_ttl
@@ -560,29 +560,25 @@ fn render_overlay(f: &mut Frame, app: &App) {
                 "Settings",
                 vec![
                     Line::from(format!(
-                        "1  {} External connections only",
-                        setting(app.snapshot.settings.external_only)
-                    )),
-                    Line::from(format!(
-                        "2  {} Automatic traceroutes",
+                        "1  {} Automatic traceroutes",
                         setting(app.snapshot.settings.traces_enabled)
                     )),
                     Line::from(format!(
-                        "3  {} Local GeoIP only",
+                        "2  {} Local GeoIP only",
                         setting(app.snapshot.settings.geo_local_only)
                     )),
                     Line::from(format!(
-                        "4  {} Record history",
+                        "3  {} Record history",
                         setting(app.snapshot.settings.history_enabled)
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
-                        "Press 1–4 to toggle · Esc close",
+                        "Press 1–3 to toggle · Esc close",
                         Style::default().fg(ACCENT),
                     )),
                 ],
                 58,
-                10,
+                9,
             )
         }
         Overlay::Privacy => (

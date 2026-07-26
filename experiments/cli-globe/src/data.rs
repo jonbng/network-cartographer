@@ -34,7 +34,6 @@ pub struct TraceStats {
 
 #[derive(Clone, Debug)]
 pub struct Settings {
-    pub external_only: bool,
     pub traces_enabled: bool,
     pub geo_local_only: bool,
     pub history_enabled: bool,
@@ -45,7 +44,6 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            external_only: true,
             traces_enabled: true,
             geo_local_only: false,
             history_enabled: false,
@@ -217,7 +215,6 @@ impl From<SnapshotDto> for Snapshot {
 impl Settings {
     fn from_dto(dto: &SettingsDto) -> Self {
         Self {
-            external_only: dto.external_only,
             traces_enabled: dto.traces_enabled,
             geo_local_only: dto.geo_local_only,
             history_enabled: dto.history_enabled,
@@ -231,7 +228,6 @@ impl Settings {
     }
 
     fn apply_to_dto(&self, dto: &mut SettingsDto) {
-        dto.external_only = self.external_only;
         dto.traces_enabled = self.traces_enabled;
         dto.geo_local_only = self.geo_local_only;
         dto.history_enabled = self.history_enabled;

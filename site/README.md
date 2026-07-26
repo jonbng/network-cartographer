@@ -17,13 +17,13 @@ Import the repository into Vercel and set the project **Root Directory** to `sit
 
 The app exposes:
 
-- `/` — product landing page
-- `/run` — redirects to the latest checksummed macOS/Linux launcher
-- `/run.ps1` — redirects to the latest checksummed Windows launcher
-- `/source` — redirects to the public repository
-- `/api/v1/geo` — validates public IP batches, rate-limits, caches, and proxies to the VPS
-- `/api/v1/egress` — locates the public client address observed by the hosting edge
-- `/api/v1/runs` — increments and reads the anonymous aggregate run count in Upstash Redis
+- `/`: product landing page
+- `/run`: redirects to the latest checksummed macOS/Linux launcher
+- `/run.ps1`: redirects to the latest checksummed Windows launcher
+- `/source`: redirects to the public repository
+- `/api/v1/geo`: validates public IP batches, rate-limits, caches, and proxies to the VPS
+- `/api/v1/egress`: locates the public client address observed by the hosting edge
+- `/api/v1/runs`: increments and reads the anonymous aggregate run count in Upstash Redis
 
 Before announcing the commands, publish at least one tagged GitHub Release so the `latest/download` assets exist.
 

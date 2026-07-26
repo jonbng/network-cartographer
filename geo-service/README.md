@@ -1,6 +1,6 @@
 # mapmy-geo (private VPS lookup service)
 
-Always-on GeoLite2 City + ASN lookup binary for Network Cartographer. **Not** a public API — only `mapmy.network` (Vercel) should call it with a shared bearer token.
+Always-on GeoLite2 City + ASN lookup binary for Network Cartographer. **Not** a public API; only `mapmy.network` (Vercel) should call it with a shared bearer token.
 
 ## Endpoints
 
@@ -14,7 +14,7 @@ Always-on GeoLite2 City + ASN lookup binary for Network Cartographer. **Not** a 
 
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
-| `GEO_SERVICE_TOKEN` | yes | — | ≥16 chars; same value as Vercel `GEO_PROVIDER_TOKEN` |
+| `GEO_SERVICE_TOKEN` | yes | - | ≥16 chars; same value as Vercel `GEO_PROVIDER_TOKEN` |
 | `GEO_CITY_MMDB` | no | `data/GeoLite2-City.mmdb` | City database path |
 | `GEO_ASN_MMDB` | no | `data/GeoLite2-ASN.mmdb` | ASN database path |
 | `GEO_LISTEN` | no | `127.0.0.1:8787` | Bind address (keep private) |

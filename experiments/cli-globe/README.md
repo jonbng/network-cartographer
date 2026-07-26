@@ -2,7 +2,7 @@
 
 A terminal-native frontend for Network Cartographer. It uses the same Rust
 monitor, snapshot DTOs, settings, collectors, traceroute engine, and GeoIP
-pipeline as the browser product—without starting the HTTP server or a browser.
+pipeline as the browser product without starting the HTTP server or a browser.
 
 The globe is software-rendered and displayed through Kitty graphics when
 available, with Unicode Braille and half-block fallbacks.

@@ -16,7 +16,6 @@ pub fn demo_snapshot() -> Snapshot {
         },
         geo_backend: "demo".into(),
         settings: Settings {
-            external_only: true,
             traces_enabled: true,
             geo_local_only: false,
             history_enabled: false,

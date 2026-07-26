@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::command::run_command_timeout;
-use super::parse::{parse_traceroute_output, TraceResult};
+use super::parse::{parse_hop_line, parse_traceroute_output, Hop, TraceResult};
 use crate::model::is_local_or_private;
 
 #[derive(Debug, Clone)]
@@ -46,10 +46,14 @@ impl Default for TraceConfig {
 #[derive(Debug, Clone)]
 pub enum TraceStatus {
     Idle,
-    Queued,
-    Running,
+    Queued {
+        previous: Option<TraceResult>,
+    },
+    Running {
+        previous: Option<TraceResult>,
+        progress: TraceProgress,
+    },
     Done(TraceResult),
-    Refreshing(TraceResult),
     Stale {
         result: TraceResult,
         message: String,
@@ -61,6 +65,12 @@ pub enum TraceStatus {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct TraceProgress {
+    pub target: IpAddr,
+    pub hops: Vec<Hop>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TraceStats {
     pub queued: usize,
@@ -69,10 +79,17 @@ pub struct TraceStats {
     pub failed: usize,
 }
 
-struct JobResult {
-    ip: IpAddr,
-    generation: u64,
-    result: TraceResult,
+enum JobEvent {
+    Progress {
+        ip: IpAddr,
+        generation: u64,
+        progress: TraceProgress,
+    },
+    Finished {
+        ip: IpAddr,
+        generation: u64,
+        result: TraceResult,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,12 +107,12 @@ pub struct TraceEngine {
     running: HashSet<IpAddr>,
     generation: u64,
     job_tx: Option<Sender<TraceJob>>,
-    result_rx: Receiver<JobResult>,
+    result_rx: Receiver<JobEvent>,
 }
 
 impl TraceEngine {
     pub fn new(cfg: TraceConfig) -> Self {
-        let (result_tx, result_rx) = mpsc::channel::<JobResult>();
+        let (result_tx, result_rx) = mpsc::channel::<JobEvent>();
         let (job_tx, job_rx) = mpsc::channel::<TraceJob>();
         let job_rx = Arc::new(Mutex::new(job_rx));
         if cfg.enabled {
@@ -149,7 +166,7 @@ impl TraceEngine {
                 TraceStatus::Done(r) if r.finished_at.elapsed() < self.cfg.cache_ttl => return,
                 TraceStatus::Failed { at, .. } if at.elapsed() < Duration::from_secs(300) => return,
                 TraceStatus::Stale { at, .. } if at.elapsed() < Duration::from_secs(300) => return,
-                TraceStatus::Queued | TraceStatus::Running | TraceStatus::Refreshing(_) => return,
+                TraceStatus::Queued { .. } | TraceStatus::Running { .. } => return,
                 _ => {}
             }
         }
@@ -160,7 +177,8 @@ impl TraceEngine {
 
         self.pending.insert(ip);
         self.queue.push_back(ip);
-        self.cache.insert(ip, TraceStatus::Queued);
+        self.cache
+            .insert(ip, TraceStatus::Queued { previous: None });
         self.dispatch();
     }
 
@@ -180,12 +198,7 @@ impl TraceEngine {
         let previous = previous_result(self.cache.remove(&ip));
         self.pending.insert(ip);
         self.queue.push_back(ip);
-        self.cache.insert(
-            ip,
-            previous
-                .map(TraceStatus::Refreshing)
-                .unwrap_or(TraceStatus::Queued),
-        );
+        self.cache.insert(ip, TraceStatus::Queued { previous });
         self.dispatch();
     }
 
@@ -200,29 +213,49 @@ impl TraceEngine {
     }
 
     pub fn poll(&mut self) {
-        while let Ok(job) = self.result_rx.try_recv() {
-            if job.generation != self.generation {
-                continue;
-            }
-            self.running.remove(&job.ip);
-            self.pending.remove(&job.ip);
-            let status = if job.result.error.is_some() && job.result.hops.is_empty() {
-                let message = job.result.error.clone().unwrap_or_else(|| "failed".into());
-                match previous_result(self.cache.remove(&job.ip)) {
-                    Some(result) => TraceStatus::Stale {
-                        result,
-                        message,
-                        at: Instant::now(),
-                    },
-                    None => TraceStatus::Failed {
-                        message,
-                        at: Instant::now(),
-                    },
+        while let Ok(event) = self.result_rx.try_recv() {
+            match event {
+                JobEvent::Progress {
+                    ip,
+                    generation,
+                    progress,
+                } => {
+                    if generation != self.generation || !self.running.contains(&ip) {
+                        continue;
+                    }
+                    let previous = previous_result(self.cache.remove(&ip));
+                    self.cache
+                        .insert(ip, TraceStatus::Running { previous, progress });
                 }
-            } else {
-                TraceStatus::Done(job.result)
-            };
-            self.cache.insert(job.ip, status);
+                JobEvent::Finished {
+                    ip,
+                    generation,
+                    result,
+                } => {
+                    if generation != self.generation {
+                        continue;
+                    }
+                    self.running.remove(&ip);
+                    self.pending.remove(&ip);
+                    let status = if result.error.is_some() && result.hops.is_empty() {
+                        let message = result.error.clone().unwrap_or_else(|| "failed".into());
+                        match previous_result(self.cache.remove(&ip)) {
+                            Some(result) => TraceStatus::Stale {
+                                result,
+                                message,
+                                at: Instant::now(),
+                            },
+                            None => TraceStatus::Failed {
+                                message,
+                                at: Instant::now(),
+                            },
+                        }
+                    } else {
+                        TraceStatus::Done(result)
+                    };
+                    self.cache.insert(ip, status);
+                }
+            }
         }
         self.dispatch();
     }
@@ -231,10 +264,9 @@ impl TraceEngine {
         let mut s = TraceStats::default();
         for st in self.cache.values() {
             match st {
-                TraceStatus::Queued => s.queued += 1,
-                TraceStatus::Running => s.running += 1,
+                TraceStatus::Queued { .. } => s.queued += 1,
+                TraceStatus::Running { .. } => s.running += 1,
                 TraceStatus::Done(_) => s.done += 1,
-                TraceStatus::Refreshing(_) => s.done += 1,
                 TraceStatus::Stale { .. } => {
                     s.done += 1;
                     s.failed += 1;
@@ -280,12 +312,7 @@ impl TraceEngine {
             let previous = previous_result(self.cache.remove(&ip));
             self.pending.insert(ip);
             self.queue.push_back(ip);
-            self.cache.insert(
-                ip,
-                previous
-                    .map(TraceStatus::Refreshing)
-                    .unwrap_or(TraceStatus::Queued),
-            );
+            self.cache.insert(ip, TraceStatus::Queued { previous });
         }
         self.cache.retain(|ip, _| targets.contains(ip));
         self.dispatch();
@@ -301,9 +328,17 @@ impl TraceEngine {
                 break;
             };
             self.running.insert(ip);
-            if !matches!(self.cache.get(&ip), Some(TraceStatus::Refreshing(_))) {
-                self.cache.insert(ip, TraceStatus::Running);
-            }
+            let previous = previous_result(self.cache.remove(&ip));
+            self.cache.insert(
+                ip,
+                TraceStatus::Running {
+                    previous,
+                    progress: TraceProgress {
+                        target: ip,
+                        hops: Vec::new(),
+                    },
+                },
+            );
             if tx
                 .send(TraceJob {
                     ip,
@@ -312,13 +347,18 @@ impl TraceEngine {
                 .is_err()
             {
                 self.running.remove(&ip);
-                self.cache.insert(
-                    ip,
-                    TraceStatus::Failed {
+                let status = match previous_result(self.cache.remove(&ip)) {
+                    Some(result) => TraceStatus::Stale {
+                        result,
                         message: "trace workers stopped".into(),
                         at: Instant::now(),
                     },
-                );
+                    None => TraceStatus::Failed {
+                        message: "trace workers stopped".into(),
+                        at: Instant::now(),
+                    },
+                };
+                self.cache.insert(ip, status);
                 break;
             }
         }
@@ -327,7 +367,7 @@ impl TraceEngine {
 
 fn worker_loop(
     job_rx: Arc<Mutex<Receiver<TraceJob>>>,
-    result_tx: Sender<JobResult>,
+    result_tx: Sender<JobEvent>,
     probe: ProbeConfig,
 ) {
     loop {
@@ -342,10 +382,16 @@ fn worker_loop(
             }
         };
 
-        let result = execute_trace(job.ip, &probe);
+        let result = execute_trace(job.ip, &probe, |progress| {
+            let _ = result_tx.send(JobEvent::Progress {
+                ip: job.ip,
+                generation: job.generation,
+                progress,
+            });
+        });
 
         if result_tx
-            .send(JobResult {
+            .send(JobEvent::Finished {
                 ip: job.ip,
                 generation: job.generation,
                 result,
@@ -359,31 +405,60 @@ fn worker_loop(
 
 fn previous_result(status: Option<TraceStatus>) -> Option<TraceResult> {
     match status? {
-        TraceStatus::Done(result) | TraceStatus::Refreshing(result) => Some(result),
+        TraceStatus::Queued { previous } | TraceStatus::Running { previous, .. } => previous,
+        TraceStatus::Done(result) => Some(result),
         TraceStatus::Stale { result, .. } => Some(result),
         _ => None,
     }
 }
 
-fn execute_trace(target: IpAddr, probe: &ProbeConfig) -> TraceResult {
+fn execute_trace<F>(target: IpAddr, probe: &ProbeConfig, mut on_progress: F) -> TraceResult
+where
+    F: FnMut(TraceProgress),
+{
     let attempts = commands_for(target, probe);
     let mut last_err = String::from("traceroute failed");
     let mut best: Option<TraceResult> = None;
+    let mut best_live: Option<TraceProgress> = None;
 
     for (program, args) in attempts {
-        match run_command_timeout(&program, &args, probe.timeout) {
-            Ok(stdout) => {
-                let mut result = parse_traceroute_output(target, &stdout);
+        let mut attempt_hops = Vec::new();
+        match run_command_timeout(&program, &args, probe.timeout, |line| {
+            let Some(hop) = parse_hop_line(line) else {
+                return;
+            };
+            upsert_hop(&mut attempt_hops, hop);
+            let candidate = TraceProgress {
+                target,
+                hops: attempt_hops.clone(),
+            };
+            if progress_rank(&candidate)
+                >= best_live
+                    .as_ref()
+                    .map(progress_rank)
+                    .unwrap_or((0, 0, 0, 0))
+            {
+                best_live = Some(candidate.clone());
+                on_progress(candidate);
+            }
+        }) {
+            Ok(output) => {
+                let mut result = parse_traceroute_output(target, &output.output);
+                let mut normalized = Vec::with_capacity(result.hops.len());
+                for hop in result.hops.drain(..) {
+                    upsert_hop(&mut normalized, hop);
+                }
+                result.hops = normalized;
+                result.error = output.warning;
                 if result.hops.is_empty() {
                     result.error = Some("no hops parsed".into());
                     last_err = format!("{program}: no hops");
                     continue;
                 }
                 // Prefer the run that actually reached the target (or most answered hops)
-                let score = path_quality(&result, target);
                 let replace = match &best {
                     None => true,
-                    Some(b) => score > path_quality(b, target),
+                    Some(b) => trace_rank(&result) > trace_rank(b),
                 };
                 if replace {
                     best = Some(result);
@@ -411,14 +486,34 @@ fn path_reached_target(r: &TraceResult, target: IpAddr) -> bool {
     r.target == target && r.reached_target()
 }
 
-fn path_quality(r: &TraceResult, target: IpAddr) -> i32 {
-    let answered = r.hops.iter().filter(|h| h.addr.is_some()).count() as i32;
-    let reached = if path_reached_target(r, target) {
-        100
-    } else {
-        0
-    };
-    reached + answered * 2
+fn trace_rank(result: &TraceResult) -> (u8, usize, u8, usize) {
+    let reached = u8::from(result.reached_target());
+    let answered = result.hops.iter().filter(|hop| hop.addr.is_some()).count();
+    let max_ttl = result.hops.iter().map(|hop| hop.ttl).max().unwrap_or(0);
+    (reached, answered, max_ttl, result.hops.len())
+}
+
+fn progress_rank(progress: &TraceProgress) -> (u8, usize, u8, usize) {
+    let reached = u8::from(
+        progress
+            .hops
+            .iter()
+            .any(|hop| hop.addr == Some(progress.target)),
+    );
+    let answered = progress
+        .hops
+        .iter()
+        .filter(|hop| hop.addr.is_some())
+        .count();
+    let max_ttl = progress.hops.iter().map(|hop| hop.ttl).max().unwrap_or(0);
+    (reached, answered, max_ttl, progress.hops.len())
+}
+
+fn upsert_hop(hops: &mut Vec<Hop>, hop: Hop) {
+    match hops.binary_search_by_key(&hop.ttl, |existing| existing.ttl) {
+        Ok(index) => hops[index] = hop,
+        Err(index) => hops.insert(index, hop),
+    }
 }
 
 /// Build OS-appropriate traceroute/tracert command attempts for `target`.
@@ -626,7 +721,10 @@ mod tests {
 
         engine.refresh_many([target]);
 
-        assert!(matches!(engine.get(target), TraceStatus::Refreshing(_)));
+        assert!(matches!(
+            engine.get(target),
+            TraceStatus::Queued { previous: Some(_) }
+        ));
         assert_eq!(engine.generation, 1);
     }
 
@@ -647,7 +745,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         engine.result_rx = receiver;
         sender
-            .send(JobResult {
+            .send(JobEvent::Finished {
                 ip: target,
                 generation: 0,
                 result: completed(target),
@@ -655,7 +753,187 @@ mod tests {
             .unwrap();
         engine.poll();
 
-        assert!(matches!(engine.get(target), TraceStatus::Refreshing(_)));
+        assert!(matches!(
+            engine.get(target),
+            TraceStatus::Queued { previous: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn fresh_progress_replaces_visible_hops_but_retains_refresh_fallback() {
+        let mut engine = TraceEngine::new(TraceConfig {
+            enabled: false,
+            ..TraceConfig::default()
+        });
+        engine.cfg.enabled = true;
+        engine.job_tx = None;
+        let target = target_v4();
+        let previous = completed(target);
+        engine.running.insert(target);
+        engine.cache.insert(
+            target,
+            TraceStatus::Running {
+                previous: Some(previous),
+                progress: TraceProgress {
+                    target,
+                    hops: Vec::new(),
+                },
+            },
+        );
+        let (sender, receiver) = mpsc::channel();
+        engine.result_rx = receiver;
+        sender
+            .send(JobEvent::Progress {
+                ip: target,
+                generation: engine.generation,
+                progress: TraceProgress {
+                    target,
+                    hops: vec![Hop {
+                        ttl: 1,
+                        addr: Some("192.0.2.1".parse().unwrap()),
+                        rtt_ms: Some(1.0),
+                    }],
+                },
+            })
+            .unwrap();
+
+        engine.poll();
+
+        match engine.get(target) {
+            TraceStatus::Running { previous, progress } => {
+                assert!(previous.is_some());
+                assert_eq!(progress.hops.len(), 1);
+                assert_eq!(progress.hops[0].ttl, 1);
+            }
+            status => panic!("unexpected trace status: {status:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_refresh_without_fresh_hops_restores_previous_route_as_stale() {
+        let mut engine = TraceEngine::new(TraceConfig {
+            enabled: false,
+            ..TraceConfig::default()
+        });
+        engine.cfg.enabled = true;
+        engine.job_tx = None;
+        let target = target_v4();
+        engine.running.insert(target);
+        engine.cache.insert(
+            target,
+            TraceStatus::Running {
+                previous: Some(completed(target)),
+                progress: TraceProgress {
+                    target,
+                    hops: Vec::new(),
+                },
+            },
+        );
+        let (sender, receiver) = mpsc::channel();
+        engine.result_rx = receiver;
+        sender
+            .send(JobEvent::Finished {
+                ip: target,
+                generation: engine.generation,
+                result: TraceResult {
+                    target,
+                    hops: Vec::new(),
+                    finished_at: Instant::now(),
+                    error: Some("timed out".into()),
+                },
+            })
+            .unwrap();
+
+        engine.poll();
+
+        assert!(matches!(
+            engine.get(target),
+            TraceStatus::Stale { result, message, .. }
+                if result.reached_target() && message == "timed out"
+        ));
+    }
+
+    #[test]
+    fn partial_result_with_error_remains_a_completed_partial_route() {
+        let mut engine = TraceEngine::new(TraceConfig {
+            enabled: false,
+            ..TraceConfig::default()
+        });
+        engine.cfg.enabled = true;
+        engine.job_tx = None;
+        let target = target_v4();
+        engine.running.insert(target);
+        engine.cache.insert(
+            target,
+            TraceStatus::Running {
+                previous: None,
+                progress: TraceProgress {
+                    target,
+                    hops: Vec::new(),
+                },
+            },
+        );
+        let (sender, receiver) = mpsc::channel();
+        engine.result_rx = receiver;
+        sender
+            .send(JobEvent::Finished {
+                ip: target,
+                generation: engine.generation,
+                result: TraceResult {
+                    target,
+                    hops: vec![Hop {
+                        ttl: 1,
+                        addr: Some("192.0.2.1".parse().unwrap()),
+                        rtt_ms: Some(1.0),
+                    }],
+                    finished_at: Instant::now(),
+                    error: Some("timed out".into()),
+                },
+            })
+            .unwrap();
+
+        engine.poll();
+
+        assert!(matches!(
+            engine.get(target),
+            TraceStatus::Done(result)
+                if result.hops.len() == 1 && result.error.as_deref() == Some("timed out")
+        ));
+    }
+
+    #[test]
+    fn hop_updates_are_sorted_and_replace_duplicate_ttls() {
+        let mut hops = Vec::new();
+        upsert_hop(
+            &mut hops,
+            Hop {
+                ttl: 2,
+                addr: None,
+                rtt_ms: None,
+            },
+        );
+        upsert_hop(
+            &mut hops,
+            Hop {
+                ttl: 1,
+                addr: Some("192.0.2.1".parse().unwrap()),
+                rtt_ms: Some(1.0),
+            },
+        );
+        upsert_hop(
+            &mut hops,
+            Hop {
+                ttl: 2,
+                addr: Some("192.0.2.2".parse().unwrap()),
+                rtt_ms: Some(2.0),
+            },
+        );
+
+        assert_eq!(
+            hops.iter().map(|hop| hop.ttl).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(hops[1].addr, Some("192.0.2.2".parse().unwrap()));
     }
 
     #[cfg(target_os = "windows")]

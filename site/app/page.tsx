@@ -20,7 +20,7 @@ export default function Home() {
         <h1 className="hero-title">See where every app connects on a live 3D globe</h1>
 
         <p className="hero-lede">
-          Local CLI. Per-app TCP map, traceroutes, globe UI on <code>127.0.0.1</code>. No account.
+          A tool to view a live map of your apps’ network requests and trace where they go.
         </p>
 
         <CommandCard />
@@ -37,8 +37,8 @@ export default function Home() {
             <code>traceroute</code> / <code>tracepath</code> / <code>tracert</code>).
           </li>
           <li>
-            Geocode hops via Network Cartographer after consent, or keep lookups offline with a
-            local MaxMind database.
+            Geocode each hop through Network Cartographer, or use a local MaxMind database for
+            offline lookups.
           </li>
           <li>
             Serve the globe UI on <code>127.0.0.1</code> only. Connection and process data
@@ -54,10 +54,6 @@ export default function Home() {
         <span>MIT</span>
         <span aria-hidden="true">·</span>
         <a href="/source">source</a>
-        <span aria-hidden="true">·</span>
-        <a href="https://github.com/jonbng/network-cartographer/blob/main/SECURITY.md">
-          security model
-        </a>
       </footer>
     </main>
   );

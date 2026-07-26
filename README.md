@@ -1,6 +1,6 @@
 # Network Cartographer
 
-A local network monitor that shows which applications connect to the internet, where they connect, and the routes traffic takes—on an interactive 3D globe.
+A local network monitor that shows which applications connect to the internet, where they connect, and the routes traffic takes on an interactive 3D globe.
 
 [CI](https://github.com/jonbng/network-cartographer/actions/workflows/ci.yml) · [MIT License](./LICENSE)
 
@@ -90,7 +90,7 @@ site/         mapmy.network website and API proxy
 experiments/  Unsupported interface experiments
 ```
 
-The CLI reads platform-native socket tables, maps TCP connections and connected UDP sockets to processes, and streams snapshots to the local UI using Server-Sent Events. Linux brackets its kernel socket dump with process-FD scans to reduce ownership races; macOS reads process descriptors through libproc; Windows reads owner-PID tables through IP Helper and inspects accessible connected UDP handles. Dashboard titles use native application metadata—Linux desktop-entry names, macOS bundle display names, and Windows version-resource descriptions—while expanded details retain the concrete executable and PID. Missing or ambiguous metadata falls back to the executable name. It runs as the current user and does not request elevated permissions. If traceroute is unavailable, connection monitoring still works.
+The CLI reads platform-native socket tables, maps TCP connections and connected UDP sockets to processes, and streams snapshots to the local UI using Server-Sent Events. Linux brackets its kernel socket dump with process-FD scans to reduce ownership races; macOS reads process descriptors through libproc; Windows reads owner-PID tables through IP Helper and inspects accessible connected UDP handles. Dashboard titles use native application metadata, including Linux desktop-entry names, macOS bundle display names, and Windows version-resource descriptions, while expanded details retain the concrete executable and PID. Missing or ambiguous metadata falls back to the executable name. It runs as the current user and does not request elevated permissions. If traceroute is unavailable, connection monitoring still works.
 
 ## Geolocation and privacy
 
@@ -119,7 +119,7 @@ The app searches the project `data/` directory and common system GeoIP locations
 - Collection runs as the current user, so protected or higher-integrity processes may not expose every socket or enough metadata for attribution. Unprovable owners appear as **Unattributed traffic**
 - TCP discovery is polling-based on macOS and Windows. Linux can supplement polling with kernel TCP close events when permitted, but isolated short-lived connections may still be missed or recovered without their process owner
 - Exceptionally large macOS socket scans are capped for safety; any truncated records and inaccessible processes are reported in the dashboard health panel
-- Automatic traceroutes require repeated, attributed TCP evidence. UDP-only, one-off, and unattributed destinations remain visible but must be traced manually with **Trace all**
+- Automatic traceroutes require repeated, attributed TCP evidence. UDP-only, one-off, and unattributed destinations remain visible but must be traced manually from the route inspector
 - Per-application upload/download rates are currently available only on Linux
 - Traceroutes depend on platform tools and network replies, and geolocation remains approximate; routes may be partial and the hosted geolocation service may be unavailable
 - Per-application split tunneling can use exits other than the single primary exit marker

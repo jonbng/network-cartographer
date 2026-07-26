@@ -74,7 +74,7 @@ pub fn parse_traceroute_output(target: IpAddr, stdout: &str) -> TraceResult {
     }
 }
 
-fn parse_hop_line(line: &str) -> Option<Hop> {
+pub(super) fn parse_hop_line(line: &str) -> Option<Hop> {
     // Common patterns:
     // " 1  10.16.96.2  2.025 ms"
     // " 3  * * *"
@@ -158,7 +158,7 @@ fn parse_hop_line(line: &str) -> Option<Hop> {
             continue;
         }
 
-        // Hostname (when -n not used) — skip unless we already have IP
+        // Hostname (when -n not used); skip unless we already have IP
         i += 1;
     }
 

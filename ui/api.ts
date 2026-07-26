@@ -9,7 +9,6 @@ const routes: Record<string, { method: string; path: string }> = {
   get_settings: { method: "GET", path: "/api/settings" },
   set_settings: { method: "PUT", path: "/api/settings" },
   reset_monitor: { method: "POST", path: "/api/reset" },
-  force_trace_all: { method: "POST", path: "/api/trace-all" },
 };
 
 export async function invoke<T = void>(

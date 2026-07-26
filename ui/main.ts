@@ -25,9 +25,11 @@ import {
   type HopSelection,
   type NetworkOrigin,
 } from "./globe";
-import { mountOnboarding } from "./onboarding";
+import { introStatus, INTRO_LOCK_MS } from "./intro-state";
 import { shouldPresentTransition, transitionCopy } from "./network-transition";
 import { RouteInspector } from "./route-inspector";
+import { mergeVisibleSettings } from "./settings-state";
+import { isRenderableTrace } from "./trace-progress";
 
 type HopDto = {
   ttl: number;
@@ -100,6 +102,7 @@ type AppDto = {
   newConnectionsPerSec?: number;
   traffic?: TrafficRateDto | null;
   destinations: DestDto[];
+  instanceCount?: number;
 };
 
 type TrafficRateDto = {
@@ -119,7 +122,6 @@ type TrafficGroupDto = {
 
 type SettingsDto = {
   settingsVersion?: number;
-  externalOnly: boolean;
   includeUdp: boolean;
   tracesEnabled: boolean;
   pollIntervalMs: number;
@@ -183,7 +185,6 @@ type SnapshotDto = {
     sources: string[];
     message: string;
   };
-  externalOnly: boolean;
   includeUdp: boolean;
   tracesEnabled: boolean;
   traceStats: { queued: number; running: number; done: number; failed: number };
@@ -208,6 +209,7 @@ type AppGroup = {
   newConnectionsPerSec: number;
   traffic: TrafficRateDto | null;
   processes: ProcessDto[];
+  instanceCount: number;
 };
 
 let snapshot: SnapshotDto | null = null;
@@ -217,19 +219,24 @@ const expanded = new Set<string>();
 const focused = new Set<string>();
 let pendingSnap: SnapshotDto | null = null;
 let paintScheduled = false;
+let paintTimer: number | null = null;
+let paintFrame: number | null = null;
 let lastPaintAt = 0;
-const MIN_PAINT_MS = 1200;
+const MIN_PAINT_MS = 1000;
 let lastSidebarSig = "";
 let lastHeaderSig = "";
 let streamStatus: StreamStatus = "connecting";
 let reconnectTimer: number | null = null;
 let streamHasOpened = false;
 let lastMonitorError: string | null = null;
-let firstRouteRevealed = false;
-let revealTimer: number | null = null;
 let transitionTimer: number | null = null;
+let toastTimer: number | null = null;
 let shownTransitionId = 0;
 let shownTransitionStatus = "";
+let queuedSettings: SettingsDto | null = null;
+let settingsWriteRunning = false;
+let persistedSettings: SettingsDto | null = null;
+let introUnlocked = false;
 
 const UNATTRIBUTED_NAME = "Unattributed traffic";
 const UNATTRIBUTED_ID = "__unattributed__";
@@ -238,22 +245,21 @@ const UNATTRIBUTED_COLOR = "#8a8680";
 const el = {
   globe: document.getElementById("globe")!,
   globeStatus: document.getElementById("globe-status")!,
-  sessionSummary: document.getElementById("session-summary")!,
+  mapEmptyState: document.getElementById("map-empty-state")!,
+  mapEmptyTitle: document.getElementById("map-empty-title")!,
+  mapEmptyDetail: document.getElementById("map-empty-detail")!,
+  introModal: document.getElementById("intro-modal")!,
+  introStatusTitle: document.getElementById("intro-status-title")!,
+  introStatusDetail: document.getElementById("intro-status-detail")!,
+  btnIntroDismiss: document.getElementById("btn-intro-dismiss") as HTMLButtonElement,
   networkOrigin: document.getElementById("network-origin") as HTMLButtonElement,
   networkOriginPlace: document.getElementById("network-origin-place")!,
   networkOriginAssessment: document.getElementById("network-origin-assessment")!,
-  traceProgress: document.getElementById("trace-progress")!,
-  traceProgressTitle: document.getElementById("trace-progress-title")!,
-  traceProgressDetail: document.getElementById("trace-progress-detail")!,
-  traceProgressCount: document.getElementById("trace-progress-count")!,
   appList: document.getElementById("app-list")!,
   sidebarSub: document.getElementById("sidebar-sub")!,
   btnClearFocus: document.getElementById("btn-clear-focus") as HTMLButtonElement,
   statApps: document.getElementById("stat-apps")!,
   statPaths: document.getElementById("stat-paths")!,
-  statHops: document.getElementById("stat-hops")!,
-  statTraces: document.getElementById("stat-traces")!,
-  statGeo: document.getElementById("stat-geo")!,
   status: document.getElementById("status-msg")!,
   healthDot: document.getElementById("health-dot")!,
   healthOverall: document.getElementById("health-overall")!,
@@ -264,13 +270,11 @@ const el = {
   healthStream: document.getElementById("health-stream")!,
   healthDetail: document.getElementById("health-detail")!,
   filter: document.getElementById("filter") as HTMLInputElement,
-  togExternal: document.getElementById("tog-external") as HTMLInputElement,
   togUdp: document.getElementById("tog-udp") as HTMLInputElement,
   udpStatus: document.getElementById("udp-status")!,
   togTraces: document.getElementById("tog-traces") as HTMLInputElement,
   togLabels: document.getElementById("tog-labels") as HTMLInputElement,
   togLocalGeo: document.getElementById("tog-local-geo") as HTMLInputElement,
-  togHistory: document.getElementById("tog-history") as HTMLInputElement,
   togEnhanced: document.getElementById("tog-enhanced") as HTMLInputElement,
   trafficSetting: document.getElementById("traffic-setting")!,
   trafficStatus: document.getElementById("traffic-status")!,
@@ -278,20 +282,14 @@ const el = {
   domainsStatus: document.getElementById("domains-status")!,
   selDensity: document.getElementById("sel-density") as HTMLSelectElement,
   btnReset: document.getElementById("btn-reset")!,
-  btnTraceAll: document.getElementById("btn-trace-all")!,
-  traceAllLabel: document.getElementById("trace-all-label")!,
   btnRecenter: document.getElementById("btn-recenter")!,
   toast: document.getElementById("toast")!,
-  onboardingHost: document.getElementById("onboarding-host")!,
   appVersion: document.getElementById("app-version")!,
   aboutModal: document.getElementById("about-modal")!,
   aboutVersion: document.getElementById("about-version")!,
   btnAbout: document.getElementById("btn-about") as HTMLButtonElement,
   btnAboutClose: document.getElementById("btn-about-close") as HTMLButtonElement,
   inspector: document.getElementById("route-inspector")!,
-  firstRouteReveal: document.getElementById("first-route-reveal")!,
-  firstRouteTitle: document.getElementById("first-route-title")!,
-  firstRouteDetail: document.getElementById("first-route-detail")!,
   networkTransition: document.getElementById("network-transition") as HTMLButtonElement,
   transitionTitle: document.getElementById("transition-title")!,
   transitionDetail: document.getElementById("transition-detail")!,
@@ -396,10 +394,98 @@ function pathForDestination(
   };
 }
 
-function collectPaths(applyFilter = true): GlobePath[] {
+function applicationGroupId(name: string): string {
+  return `app-group:${name.trim().replace(/\s+/g, " ").toLocaleLowerCase()}`;
+}
+
+function tracePriority(trace: TraceDto): number {
+  if (trace.status === "done" && trace.hops.length > 0) return 5;
+  if (trace.status === "running") return 4;
+  if (trace.status === "queued") return 3;
+  if (trace.status === "done") return 2;
+  if (trace.status === "failed") return 1;
+  return 0;
+}
+
+function mergeApplications(apps: AppDto[]): AppDto[] {
+  const grouped = new Map<string, AppDto>();
+  for (const app of apps) {
+    const id = applicationGroupId(app.name);
+    const existing = grouped.get(id);
+    if (!existing) {
+      grouped.set(id, {
+        ...app,
+        id,
+        pids: [...app.pids],
+        processes: [...(app.processes ?? [])],
+        destinations: app.destinations.map((dest) => ({
+          ...dest,
+          processIds: [...(dest.processIds ?? [])],
+        })),
+        instanceCount: 1,
+      });
+      continue;
+    }
+
+    existing.instanceCount = (existing.instanceCount ?? 1) + 1;
+    existing.iconUrl ||= app.iconUrl;
+    existing.path ||= app.path;
+    existing.pids = [...new Set([...existing.pids, ...app.pids])];
+    existing.processes = [...new Map(
+      [...(existing.processes ?? []), ...(app.processes ?? [])]
+        .map((process) => [process.id, process]),
+    ).values()];
+    existing.hits += app.hits;
+    existing.hitsPerSec = (existing.hitsPerSec ?? 0) + (app.hitsPerSec ?? 0);
+    existing.activity = (existing.activity ?? 0) + (app.activity ?? app.hitsPerSec ?? 0);
+    existing.currentConnections = (existing.currentConnections ?? 0) + (app.currentConnections ?? 0);
+    existing.newConnectionsPerSec =
+      (existing.newConnectionsPerSec ?? 0) + (app.newConnectionsPerSec ?? app.hitsPerSec ?? 0);
+    if (app.traffic) {
+      if (existing.traffic) {
+        existing.traffic = {
+          ...existing.traffic,
+          rxBytesPerSec: existing.traffic.rxBytesPerSec + app.traffic.rxBytesPerSec,
+          txBytesPerSec: existing.traffic.txBytesPerSec + app.traffic.txBytesPerSec,
+          totalBytesPerSec: existing.traffic.totalBytesPerSec + app.traffic.totalBytesPerSec,
+          sampleWindowMs: Math.max(existing.traffic.sampleWindowMs, app.traffic.sampleWindowMs),
+        };
+      } else {
+        existing.traffic = { ...app.traffic };
+      }
+    }
+
+    for (const dest of app.destinations) {
+      const match = existing.destinations.find(
+        (candidate) =>
+          candidate.protocol === dest.protocol &&
+          candidate.ip === dest.ip &&
+          candidate.port === dest.port,
+      );
+      if (!match) {
+        existing.destinations.push({
+          ...dest,
+          processIds: [...(dest.processIds ?? [])],
+        });
+        continue;
+      }
+      match.hits += dest.hits;
+      match.lastSeenSecs = Math.min(match.lastSeenSecs, dest.lastSeenSecs);
+      match.processIds = [...new Set([...(match.processIds ?? []), ...(dest.processIds ?? [])])];
+      match.pathChanged = !!match.pathChanged || !!dest.pathChanged;
+      if (tracePriority(dest.trace) > tracePriority(match.trace)) {
+        match.trace = dest.trace;
+      }
+    }
+    existing.destCount = existing.destinations.length;
+  }
+  return [...grouped.values()];
+}
+
+function collectPaths(apps: AppDto[], applyFilter = true): GlobePath[] {
   if (!snapshot) return [];
   const paths: GlobePath[] = [];
-  for (const app of snapshot.apps) {
+  for (const app of apps) {
     for (const dest of app.destinations) {
       if (applyFilter && !matchesFilter(app.name, dest)) continue;
       paths.push(
@@ -432,11 +518,11 @@ function collectPaths(applyFilter = true): GlobePath[] {
   return paths;
 }
 
-function collectAppGroups(paths: GlobePath[]): AppGroup[] {
+function collectAppGroups(apps: AppDto[], paths: GlobePath[]): AppGroup[] {
   if (!snapshot) return [];
   const byId = new Map(paths.map((p) => [p.id, p]));
   const groups: AppGroup[] = [];
-  for (const app of snapshot.apps) {
+  for (const app of apps) {
     const color = colorForKey(app.id);
     const group: AppGroup = {
       id: app.id,
@@ -452,6 +538,7 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
       newConnectionsPerSec: app.newConnectionsPerSec ?? app.hitsPerSec ?? 0,
       traffic: app.traffic ?? null,
       processes: app.processes ?? [],
+      instanceCount: app.instanceCount ?? 1,
     };
     for (const dest of app.destinations) {
       if (!matchesFilter(app.name, dest)) continue;
@@ -505,41 +592,62 @@ function sidebarSignature(groups: AppGroup[]): string {
       const dests = g.paths
         .map(
           (p) =>
-            `${p.host}:${p.port}:${p.status}:${p.domainSource}:${p.domainConfidence}:${p.domainAlternativesCount}:${p.hops.filter((h) => h.lat != null).length}`,
+            `${p.host}:${p.port}:${p.hits}:${p.status}:${p.freshness}:${p.domainSource}:${p.domainConfidence}:${p.domainAlternativesCount}:${p.hops.length}:${p.hops.filter((h) => h.lat != null).length}:${p.rttMs == null ? "" : Math.round(p.rttMs)}`,
         )
         .join(";");
-      const processes = g.processes.map((process) => process.id).sort().join(",");
-      return `${g.id}|${g.name}|${g.iconUrl ?? ""}|${g.traced}/${g.totalDests}|${g.activity.toFixed(1)}|${g.currentConnections}|${processes}|${dests}`;
+      const processes = g.processes
+        .map((process) => `${process.id}:${process.pid}:${process.name}:${process.path ?? ""}`)
+        .sort()
+        .join(",");
+      const displayedActivity = g.traffic
+        ? `${formatByteRate(g.traffic.rxBytesPerSec)}:${formatByteRate(g.traffic.txBytesPerSec)}`
+        : g.newConnectionsPerSec > 0.05
+          ? g.newConnectionsPerSec.toFixed(1)
+          : "";
+      return `${g.id}|${g.name}|${g.instanceCount}|${g.iconUrl ?? ""}|${g.traced}/${g.totalDests}|${displayedActivity}|${g.currentConnections}|${processes}|${dests}`;
     })
     .join("||");
   const unattributed = snapshot?.unattributed;
-  return `${foc}#${exp}#${filter}#${body}#${unattributed?.connections ?? 0}`;
+  const unattributedBody = unattributed?.destinations
+    .map((dest) => `${destName(dest)}:${dest.port}:${dest.protocol}:${dest.hits}:${dest.trace.status}`)
+    .join(";") ?? "";
+  return `${foc}#${exp}#${filter}#${body}#${unattributed?.currentConnections ?? 0}:${unattributedBody}`;
 }
 
 function currentSettings(): SettingsDto {
-  return {
+  const base = persistedSettings ?? snapshot?.settings ?? {
+    includeUdp: true,
+    tracesEnabled: true,
+    pollIntervalMs: 1000,
+  };
+  return mergeVisibleSettings(base, {
     settingsVersion: 3,
-    externalOnly: el.togExternal.checked,
     includeUdp: el.togUdp.checked,
     tracesEnabled: el.togTraces.checked,
-    pollIntervalMs: 1000,
+    pollIntervalMs: persistedSettings?.pollIntervalMs ?? snapshot?.settings?.pollIntervalMs ?? 1000,
     geoLocalOnly: el.togLocalGeo.checked,
-    showLowConfidence: true,
-    confidenceMin: 0.45,
     globeDensity: el.selDensity.value,
     identifyDomains: el.togDomains.checked,
-    historyEnabled: el.togHistory.checked,
     enhancedMonitoring: el.togEnhanced.checked,
     privacyAccepted: true,
-  };
+  });
 }
 
 async function pushSettings() {
-  try {
-    await invoke("set_settings", { settings: currentSettings() });
-  } catch {
-    /* preview */
+  queuedSettings = currentSettings();
+  if (settingsWriteRunning) return;
+
+  settingsWriteRunning = true;
+  while (queuedSettings) {
+    const settings = queuedSettings;
+    queuedSettings = null;
+    try {
+      persistedSettings = await invoke<SettingsDto>("set_settings", { settings });
+    } catch {
+      /* preview */
+    }
   }
+  settingsWriteRunning = false;
 }
 
 type HealthState = "ready" | "degraded" | "unavailable" | "waiting";
@@ -552,11 +660,9 @@ function setHealthValue(element: HTMLElement, text: string, state: HealthState =
 
 function renderCapabilities(): void {
   const trafficRates = snapshot?.capabilities?.trafficRates ?? true;
-  el.togEnhanced.disabled = !trafficRates;
-  el.trafficSetting.classList.toggle("is-unavailable", !trafficRates);
+  el.trafficSetting.hidden = !trafficRates;
   if (!trafficRates) {
     el.togEnhanced.checked = false;
-    el.trafficStatus.textContent = "Unavailable on macOS";
   } else {
     el.trafficStatus.textContent = "Native per-app upload and download";
   }
@@ -652,59 +758,36 @@ function renderHealth(mappedPaths: GlobePath[]): void {
   el.healthDetail.textContent = [...new Set(details)].join(" · ");
 }
 
-function renderSessionExperience(mappedPaths: GlobePath[]): void {
-  if (!snapshot || mappedPaths.length === 0) {
-    el.sessionSummary.hidden = true;
-    return;
+function renderEntryStates(visibleRoutes: number, allRoutes: number): void {
+  const state = introStatus(snapshot && {
+    appCount: snapshot.appCount,
+    destCount: snapshot.destCount,
+    tracesEnabled: snapshot.tracesEnabled,
+    queued: snapshot.traceStats.queued,
+    running: snapshot.traceStats.running,
+    done: snapshot.traceStats.done,
+    failed: snapshot.traceStats.failed,
+    mappedRoutes: allRoutes,
+  });
+  el.introStatusTitle.textContent = state.title;
+  el.introStatusDetail.textContent = state.detail;
+
+  el.mapEmptyState.hidden = visibleRoutes > 0;
+  if (visibleRoutes === 0) {
+    el.mapEmptyTitle.textContent = state.emptyTitle;
+    el.mapEmptyDetail.textContent = state.emptyDetail;
   }
+}
 
-  const organizations = new Set<string>();
-  for (const app of snapshot.apps) {
-    for (const destination of app.destinations) {
-      if (destination.org && destination.org.toLowerCase() !== "unknown") {
-        organizations.add(destination.org);
-      }
-    }
-  }
-  const countries = new Set(
-    mappedPaths.flatMap((path) => path.hops.map((hop) => hop.country).filter(Boolean) as string[]),
-  );
-  const parts = [`${snapshot.appCount} ${snapshot.appCount === 1 ? "app" : "apps"}`];
-  if (organizations.size > 0) parts.push(`${organizations.size} destination ${organizations.size === 1 ? "network" : "networks"}`);
-  if (countries.size > 0) parts.push(`${countries.size} mapped ${countries.size === 1 ? "country" : "countries"}`);
-  el.sessionSummary.textContent = parts.join(" · ");
-  el.sessionSummary.hidden = false;
-
-  if (firstRouteRevealed) return;
-  const candidate = mappedPaths.find(
-    (path) => path.appId !== UNATTRIBUTED_ID && path.hops.filter((hop) => hop.lat != null && hop.lon != null).length >= 2,
-  ) ?? mappedPaths.find((path) => path.hops.filter((hop) => hop.lat != null && hop.lon != null).length >= 2);
-  if (!candidate) return;
-
-  const located = candidate.hops.filter((hop) => hop.lat != null && hop.lon != null);
-  const last = located.at(-1)!;
-  const place = last.city
-    ? `${last.city}${last.country ? `, ${last.country}` : ""}`
-    : last.country || "Across the public internet";
-  const answeredHops = candidate.hops.filter((hop) => hop.addr != null).length;
-  firstRouteRevealed = true;
-  el.onboardingHost.replaceChildren();
-  el.networkTransition.hidden = true;
-  shownTransitionStatus = "";
-  if (transitionTimer != null) window.clearTimeout(transitionTimer);
-  el.firstRouteTitle.textContent = `${candidate.app} → ${candidate.destinationOrg || candidate.host}`;
-  el.firstRouteDetail.textContent = `${place} · ${answeredHops} answering ${answeredHops === 1 ? "hop" : "hops"}`;
-  el.firstRouteReveal.hidden = false;
-  if (revealTimer != null) window.clearTimeout(revealTimer);
-  revealTimer = window.setTimeout(() => {
-    el.firstRouteReveal.hidden = true;
-    renderNetworkTransition(snapshot?.networkOrigin ?? null);
-  }, 4500);
+function dismissIntro(): void {
+  if (!introUnlocked || el.introModal.hidden) return;
+  el.introModal.hidden = true;
+  el.btnRecenter.focus({ preventScroll: true });
 }
 
 function renderNetworkTransition(origin: NetworkOrigin | null): void {
   const transition = origin?.transition;
-  if (!shouldPresentTransition(transition, shownTransitionId) || !transition || !el.firstRouteReveal.hidden) return;
+  if (!shouldPresentTransition(transition, shownTransitionId) || !transition) return;
 
   const isNew = transition.id > shownTransitionId;
   const statusChanged = transition.status !== shownTransitionStatus;
@@ -726,6 +809,7 @@ function renderNetworkTransition(origin: NetworkOrigin | null): void {
 }
 
 function paint(forceSidebar = false) {
+  cancelScheduledPaint();
   paintScheduled = false;
   lastPaintAt = performance.now();
   if (pendingSnap) {
@@ -739,11 +823,14 @@ function paint(forceSidebar = false) {
     el.domainsStatus.textContent = snapshot.destinationNaming.message;
   }
 
-  const allPaths = collectPaths(false);
-  const allMappedPaths = allPaths.filter((p) => p.status === "done" && p.hops.length > 0);
-  const paths = collectPaths(true);
-  const mapPaths = paths.filter((p) => p.status === "done" && p.hops.length > 0);
-  const groups = collectAppGroups(paths);
+  const apps = mergeApplications(snapshot?.apps ?? []);
+  const allPaths = collectPaths(apps, false);
+  const completedMappedPaths = allPaths.filter(
+    (p) => p.status === "done" && p.hops.length > 0,
+  );
+  const paths = collectPaths(apps, true);
+  const mapPaths = paths.filter(isRenderableTrace);
+  const groups = collectAppGroups(apps, paths);
   const networkOrigin = snapshot?.networkOrigin ?? null;
   setFocusedApps([...focused]);
   routeInspector.update(allPaths, networkOrigin);
@@ -757,7 +844,7 @@ function paint(forceSidebar = false) {
   if (snapshot) {
     const t = snapshot.traceStats;
     const headerSig = [
-      snapshot.appCount,
+      apps.length,
       snapshot.liveConnections,
       t.queued,
       t.running,
@@ -784,38 +871,9 @@ function paint(forceSidebar = false) {
 
     if (headerSig !== lastHeaderSig) {
       lastHeaderSig = headerSig;
-      el.statApps.textContent = `${snapshot.appCount}`;
-      el.statTraces.textContent = snapshot.tracesEnabled
-        ? `Q${t.queued} · R${t.running} · ${t.done} done`
-        : "offline";
-      const tracesRemaining = t.queued + t.running;
-      const tracesArePending = snapshot.tracesEnabled && tracesRemaining > 0;
-      el.traceProgress.hidden = !tracesArePending;
-      el.traceProgress.classList.toggle("actively-running", t.running > 0);
-      el.btnTraceAll.toggleAttribute("disabled", tracesArePending);
-      el.btnTraceAll.setAttribute("aria-busy", String(tracesArePending));
-      el.traceAllLabel.textContent = tracesArePending
-        ? `Tracing ${tracesRemaining}`
-        : "Trace all";
-      if (tracesArePending) {
-        el.traceProgressTitle.textContent = t.running > 0
-          ? "Traceroute in progress"
-          : "Traceroutes queued";
-        el.traceProgressDetail.textContent = `Results arrive gradually — ${tracesRemaining} ${tracesRemaining === 1 ? "route is" : "routes are"} still being measured`;
-        el.traceProgressCount.textContent = t.running > 0
-          ? `${t.running} active · ${t.queued} queued`
-          : `${t.queued} waiting`;
-      }
-      if (el.statGeo) {
-        const backend = snapshot.geoBackend ?? "api";
-        el.statGeo.textContent = backend;
-        el.statGeo.classList.toggle("accent", !!snapshot.geoMmdb);
-        el.statGeo.title = snapshot.geoMmdb
-          ? "Local MaxMind city DB loaded"
-          : "Online geo only";
-      }
+      el.statApps.textContent = `${apps.length}`;
       el.btnClearFocus.hidden = focused.size === 0;
-      const focusedNames = snapshot.apps
+      const focusedNames = apps
         .filter((app) => focused.has(app.id))
         .map((app) => app.name);
       el.sidebarSub.textContent =
@@ -836,10 +894,9 @@ function paint(forceSidebar = false) {
     destCount = stats.destCount;
   }
   el.statPaths.textContent = `${pathCount}`;
-  el.statHops.textContent = `${hopCount}`;
   el.globeStatus.textContent = pathCount > 0
     ? `${pathCount} paths · ${destCount} destinations · ${hopCount} hops`
-    : allMappedPaths.length > 0
+    : completedMappedPaths.length > 0
       ? "No mapped routes match this view"
     : !snapshot
       ? "Starting monitor…"
@@ -851,16 +908,18 @@ function paint(forceSidebar = false) {
             ? "Mapping routes · traceroutes take a little time"
             : "Connections detected · route mapping is off";
   renderCapabilities();
-  renderHealth(allMappedPaths);
-  renderSessionExperience(allMappedPaths);
+  renderHealth(completedMappedPaths);
+  renderEntryStates(pathCount, completedMappedPaths.length);
   renderNetworkTransition(networkOrigin);
 
   const sig = sidebarSignature(groups);
   if (forceSidebar || sig !== lastSidebarSig) {
     lastSidebarSig = sig;
     const scrollTop = el.appList.scrollTop;
-    renderSidebar(groups);
+    const activeSidebarControl = sidebarControlIdentity(document.activeElement);
+    renderSidebar(groups, apps);
     el.appList.scrollTop = scrollTop;
+    restoreSidebarFocus(activeSidebarControl);
   }
 }
 
@@ -870,9 +929,11 @@ function renderNetworkOrigin(origin: NetworkOrigin | null) {
   const exit = origin?.exit;
   if (!origin || origin.status === "locating") {
     el.networkOriginPlace.textContent = "Locating…";
+    el.networkOriginAssessment.hidden = false;
     el.networkOriginAssessment.textContent = "Inspecting route";
     return;
   }
+  el.networkOriginAssessment.hidden = origin.assessment === "no_evidence";
   if (!exit) {
     el.networkOriginPlace.textContent = "Unavailable";
     el.networkOriginAssessment.textContent = assessmentText(origin.assessment);
@@ -891,20 +952,39 @@ function assessmentText(assessment: NetworkOrigin["assessment"]): string {
   if (assessment === "proxy_and_tunnel") return "Proxy + tunnel signals";
   if (assessment === "proxy_configured") return "Proxy configured";
   if (assessment === "tunnel_likely") return "VPN / tunnel likely";
-  if (assessment === "no_evidence") return "No VPN / proxy evidence";
+  if (assessment === "no_evidence") return "";
   return "Evidence unavailable";
 }
 
 function schedulePaint(snap?: SnapshotDto, immediate = false) {
   if (snap) pendingSnap = snap;
   if (immediate) {
+    cancelScheduledPaint();
     paint(true);
     return;
   }
   if (paintScheduled) return;
   const wait = Math.max(0, MIN_PAINT_MS - (performance.now() - lastPaintAt));
   paintScheduled = true;
-  window.setTimeout(() => requestAnimationFrame(() => paint(false)), wait);
+  paintTimer = window.setTimeout(() => {
+    paintTimer = null;
+    paintFrame = requestAnimationFrame(() => {
+      paintFrame = null;
+      paint(false);
+    });
+  }, wait);
+}
+
+function cancelScheduledPaint(): void {
+  if (paintTimer != null) {
+    window.clearTimeout(paintTimer);
+    paintTimer = null;
+  }
+  if (paintFrame != null) {
+    cancelAnimationFrame(paintFrame);
+    paintFrame = null;
+  }
+  paintScheduled = false;
 }
 
 function handleStreamStatus(next: StreamStatus): void {
@@ -948,7 +1028,14 @@ function statusBadge(status: string): string {
   return `<span class="badge">${escapeHtml(status)}</span>`;
 }
 
-function renderSidebar(groups: AppGroup[]) {
+function renderSidebar(groups: AppGroup[], apps: AppDto[]) {
+  const retainedIcons = new Map<string, HTMLImageElement>();
+  for (const card of el.appList.querySelectorAll<HTMLElement>("[data-app]")) {
+    const id = card.dataset.app;
+    const icon = card.querySelector<HTMLImageElement>(".app-icon-image");
+    if (id && icon) retainedIcons.set(id, icon);
+  }
+
   if (groups.length === 0 && !snapshot?.unattributed) {
     el.appList.innerHTML = `<div class="empty">No internet activity detected yet.<br>Open websites hosted in a few different countries, then give the map a moment.</div>`;
     return;
@@ -964,6 +1051,9 @@ function renderSidebar(groups: AppGroup[]) {
         : g.newConnectionsPerSec > 0.05
           ? `<span class="act"> · ${g.newConnectionsPerSec.toFixed(1)} new/s</span>`
           : "";
+      const instances = g.instanceCount > 1
+        ? ` · ${g.instanceCount} instances`
+        : "";
       const processRows = isOpen && g.processes.length
         ? `<div class="process-list" aria-label="Owning processes">${g.processes
             .slice()
@@ -984,10 +1074,10 @@ function renderSidebar(groups: AppGroup[]) {
               const mapped = p.hops.filter((h) => h.lat != null).length;
               const lastCity =
                 [...p.hops].reverse().find((h) => h.city)?.city ?? null;
-              const rtt = p.rttMs != null ? `${Math.round(p.rttMs)}ms` : "—";
+              const rtt = p.rttMs != null ? `${Math.round(p.rttMs)}ms` : "-";
               const destCity = lastCity ? ` · ${escapeHtml(lastCity)}` : "";
               // org from snapshot if available
-              const destMeta = snapshot?.apps
+              const destMeta = apps
                 .find((a) => a.id === g.id)
                 ?.destinations.find(
                   (d) => d.ip === p.ip && d.port === p.port,
@@ -1040,7 +1130,7 @@ function renderSidebar(groups: AppGroup[]) {
           <span class="app-icon-shell" style="--app-color:${g.color}"><span class="app-icon-fallback"></span>${icon}<i></i></span>
           <span class="app-main">
             <span class="app-name">${escapeHtml(g.name)}</span>
-            <span class="app-meta">${g.traced}/${g.totalDests} dests · ${g.currentConnections} current${act}</span>
+            <span class="app-meta">${g.traced}/${g.totalDests} dests · ${g.currentConnections} current${instances}${act}</span>
           </span>
           <span class="chev">${isOpen ? "▾" : "▸"}</span>
         </button>
@@ -1049,10 +1139,20 @@ function renderSidebar(groups: AppGroup[]) {
     })
     .join("");
   el.appList.innerHTML = applications + renderUnattributed(snapshot?.unattributed ?? null);
+
+  // Keep decoded app icons alive across live-data refreshes. Recreating image
+  // nodes every second causes a visible fallback/icon flash on some browsers.
+  for (const card of el.appList.querySelectorAll<HTMLElement>("[data-app]")) {
+    const id = card.dataset.app;
+    const nextIcon = card.querySelector<HTMLImageElement>(".app-icon-image");
+    const retained = id ? retainedIcons.get(id) : null;
+    if (nextIcon && retained && nextIcon.src === retained.src) nextIcon.replaceWith(retained);
+  }
 }
 
 function renderUnattributed(group: TrafficGroupDto | null): string {
   if (!group) return "";
+  const isOpen = expanded.has(UNATTRIBUTED_ID);
   const stats = snapshot?.attribution;
   const reasons = [
     stats?.ownerGone ? `${stats.ownerGone} owner unavailable` : "",
@@ -1061,32 +1161,64 @@ function renderUnattributed(group: TrafficGroupDto | null): string {
   ]
     .filter(Boolean)
     .join(" · ");
-  const rows = group.destinations
-    .slice()
-    .sort((a, b) => b.hits - a.hits)
-    .map((dest) => {
-      const id = routeId(UNATTRIBUTED_ID, dest);
-      return `<button type="button" class="dest-row${routeInspector.selectedRouteId === id ? " selected" : ""}" data-route-id="${escapeHtml(id)}" title="Inspect unattributed route to ${escapeHtml(dest.ip)}" aria-pressed="${routeInspector.selectedRouteId === id}">
-        <span class="dest-star muted-star">?</span>
-        <span class="dest-main">
-          <span class="dest-host">${escapeHtml(destName(dest))}</span>
-          <span class="dest-meta">:${dest.port} · ${escapeHtml(dest.protocol)} · ${dest.hits} connection${dest.hits === 1 ? "" : "s"}</span>
-        </span>
-        <span class="dest-side">${statusBadge(dest.trace.status)}</span>
-      </button>`;
-    })
-    .join("");
-  return `<details class="app-card unattributed-card">
-    <summary class="app-row">
+  const rows = isOpen
+    ? group.destinations
+        .slice()
+        .sort((a, b) => b.hits - a.hits)
+        .map((dest) => {
+          const id = routeId(UNATTRIBUTED_ID, dest);
+          return `<button type="button" class="dest-row${routeInspector.selectedRouteId === id ? " selected" : ""}" data-route-id="${escapeHtml(id)}" title="Inspect unattributed route to ${escapeHtml(dest.ip)}" aria-pressed="${routeInspector.selectedRouteId === id}">
+            <span class="dest-star muted-star">?</span>
+            <span class="dest-main">
+              <span class="dest-host">${escapeHtml(destName(dest))}</span>
+              <span class="dest-meta">:${dest.port} · ${escapeHtml(dest.protocol)} · ${dest.hits} connection${dest.hits === 1 ? "" : "s"}</span>
+            </span>
+            <span class="dest-side">${statusBadge(dest.trace.status)}</span>
+          </button>`;
+        })
+        .join("")
+    : "";
+  return `<div class="app-card unattributed-card">
+    <button type="button" class="app-row" data-unattributed-toggle aria-expanded="${isOpen}">
       <span class="swatch unattributed-swatch"></span>
       <span class="app-main">
         <span class="app-name">Unattributed traffic</span>
         <span class="app-meta">${group.destinations.length} dests · ${group.currentConnections} current${reasons ? ` · ${reasons}` : ""}</span>
       </span>
-      <span class="chev">▾</span>
-    </summary>
-    <div class="dest-list">${rows}</div>
-  </details>`;
+      <span class="chev">${isOpen ? "▾" : "▸"}</span>
+    </button>
+    ${isOpen ? `<div class="dest-list">${rows}</div>` : ""}
+  </div>`;
+}
+
+type SidebarControlIdentity =
+  | { kind: "app"; value: string }
+  | { kind: "route"; value: string }
+  | { kind: "unattributed"; value: "" };
+
+function sidebarControlIdentity(active: Element | null): SidebarControlIdentity | null {
+  if (!(active instanceof HTMLElement) || !el.appList.contains(active)) return null;
+  if (active.dataset.appToggle) return { kind: "app", value: active.dataset.appToggle };
+  if (active.dataset.routeId) return { kind: "route", value: active.dataset.routeId };
+  if (active.hasAttribute("data-unattributed-toggle")) {
+    return { kind: "unattributed", value: "" };
+  }
+  return null;
+}
+
+function restoreSidebarFocus(identity: SidebarControlIdentity | null): void {
+  if (!identity) return;
+  const candidates = identity.kind === "app"
+    ? el.appList.querySelectorAll<HTMLElement>("[data-app-toggle]")
+    : identity.kind === "route"
+      ? el.appList.querySelectorAll<HTMLElement>("[data-route-id]")
+      : el.appList.querySelectorAll<HTMLElement>("[data-unattributed-toggle]");
+  const match = [...candidates].find((element) => {
+    if (identity.kind === "app") return element.dataset.appToggle === identity.value;
+    if (identity.kind === "route") return element.dataset.routeId === identity.value;
+    return true;
+  });
+  match?.focus({ preventScroll: true });
 }
 
 function formatByteRate(bytes: number): string {
@@ -1104,9 +1236,11 @@ function escapeHtml(s: string): string {
 }
 
 function showToast(msg: string) {
+  if (toastTimer != null) window.clearTimeout(toastTimer);
   el.toast.hidden = false;
   el.toast.textContent = msg;
-  window.setTimeout(() => {
+  toastTimer = window.setTimeout(() => {
+    toastTimer = null;
     el.toast.hidden = true;
   }, 4500);
 }
@@ -1118,6 +1252,16 @@ function wireUi() {
     image.hidden = true;
     image.parentElement?.classList.add("icon-missing");
   }, true);
+  el.btnIntroDismiss.addEventListener("click", dismissIntro);
+  el.introModal.addEventListener("click", (event) => {
+    if (event.target === el.introModal) dismissIntro();
+  });
+  window.setTimeout(() => {
+    introUnlocked = true;
+    el.btnIntroDismiss.disabled = false;
+    el.btnIntroDismiss.focus({ preventScroll: true });
+  }, INTRO_LOCK_MS);
+  requestAnimationFrame(() => el.introModal.focus({ preventScroll: true }));
   el.networkTransition.addEventListener("click", () => {
     if (!snapshot?.networkOrigin) return;
     el.networkTransition.hidden = true;
@@ -1133,6 +1277,15 @@ function wireUi() {
     }
   });
   el.appList.addEventListener("click", (ev) => {
+    const unattributedToggle = (ev.target as HTMLElement).closest<HTMLElement>(
+      "[data-unattributed-toggle]",
+    );
+    if (unattributedToggle) {
+      if (expanded.has(UNATTRIBUTED_ID)) expanded.delete(UNATTRIBUTED_ID);
+      else expanded.add(UNATTRIBUTED_ID);
+      paint(true);
+      return;
+    }
     const routeButton = (ev.target as HTMLElement).closest<HTMLButtonElement>(
       "[data-route-id]",
     );
@@ -1176,11 +1329,9 @@ function wireUi() {
   });
 
   for (const t of [
-    el.togExternal,
     el.togUdp,
     el.togTraces,
     el.togLocalGeo,
-    el.togHistory,
     el.togEnhanced,
     el.togDomains,
   ]) {
@@ -1207,13 +1358,8 @@ function wireUi() {
     expanded.clear();
     lastSidebarSig = "";
     lastHeaderSig = "";
-    showToast("Reset history and traceroute cache");
+    showToast("Current apps, routes, and caches cleared");
     schedulePaint(undefined, true);
-  });
-
-  el.btnTraceAll.addEventListener("click", async () => {
-    await invoke("force_trace_all");
-    showToast("Re-tracing all destinations…");
   });
 
   el.btnRecenter.addEventListener("click", () => {
@@ -1239,13 +1385,23 @@ function wireUi() {
   });
   window.addEventListener("keydown", (ev) => {
     const target = ev.target as HTMLElement | null;
+    if (ev.key === "Tab" && !el.introModal.hidden) {
+      ev.preventDefault();
+      (introUnlocked ? el.btnIntroDismiss : el.introModal).focus({ preventScroll: true });
+      return;
+    }
     if (
       ev.key === "/" &&
+      el.introModal.hidden &&
       target?.tagName !== "INPUT" &&
       target?.tagName !== "TEXTAREA"
     ) {
       ev.preventDefault();
       el.filter.focus();
+      return;
+    }
+    if (ev.key === "Escape" && !el.introModal.hidden) {
+      dismissIntro();
       return;
     }
     if (ev.key === "Escape" && !el.aboutModal.hidden) {
@@ -1309,13 +1465,12 @@ async function boot() {
 
   try {
     const settings = await invoke<SettingsDto>("get_settings");
+    persistedSettings = settings;
     el.togEnhanced.checked = !!settings.enhancedMonitoring;
     el.togDomains.checked = settings.identifyDomains !== false;
-    el.togExternal.checked = settings.externalOnly;
     el.togUdp.checked = settings.includeUdp;
     el.togTraces.checked = settings.tracesEnabled;
     el.togLocalGeo.checked = !!settings.geoLocalOnly;
-    el.togHistory.checked = !!settings.historyEnabled;
     if (settings.globeDensity) {
       el.selDensity.value = settings.globeDensity;
       setDensity(settings.globeDensity as "all" | "destinations" | "hubs");
@@ -1324,7 +1479,6 @@ async function boot() {
     /* preview */
   }
 
-  mountOnboarding(el.onboardingHost);
   listenToStreamStatus(handleStreamStatus);
 
   try {

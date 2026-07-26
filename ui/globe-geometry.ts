@@ -17,11 +17,61 @@ export type PulsePoint = { lat: number; lng: number; altitude: number };
 
 export type SegmentVisualState = "dimmed" | "emphasized" | "normal";
 
+const DEFAULT_CAMERA_ALTITUDE = 1.9;
+
 export type AmbientRouteCandidate = {
   id: string;
   appId: string;
   mappedHopCount: number;
 };
+
+export type GlobeLabelCandidate = {
+  lat: number;
+  lng: number;
+  label: string;
+  /** Text height in angular degrees, matching globe.gl's labelSize unit. */
+  size: number;
+  priority: number;
+};
+
+const NEARBY_DUPLICATE_LABEL_DEGREES = 1.5;
+
+/**
+ * Keep the most useful label when nearby map text would collide.
+ *
+ * Labels live on the globe's tangent plane and their size is expressed in
+ * angular degrees, so collision checks can happen before Three.js builds the
+ * text meshes. The longitude distance is latitude-compensated and wrapped at
+ * the antimeridian.
+ */
+export function selectNonOverlappingLabels<T extends GlobeLabelCandidate>(
+  candidates: T[],
+): T[] {
+  const ranked = candidates
+    .map((candidate, index) => ({ candidate, index }))
+    .sort(
+      (a, b) => b.candidate.priority - a.candidate.priority || a.index - b.index,
+    );
+  const kept: T[] = [];
+
+  for (const { candidate } of ranked) {
+    const normalized = normalizeMapLabel(candidate.label);
+    const isNearbyDuplicate = kept.some(
+      (other) =>
+        normalizeMapLabel(other.label) === normalized &&
+        angularDistance(candidate, other) < NEARBY_DUPLICATE_LABEL_DEGREES,
+    );
+    if (
+      isNearbyDuplicate ||
+      kept.some((other) => labelsCollide(candidate, other))
+    ) {
+      continue;
+    }
+    kept.push(candidate);
+  }
+
+  return kept;
+}
 
 type Vector3 = { x: number; y: number; z: number };
 
@@ -43,6 +93,27 @@ export function gapShouldAnimate(
   reduceMotion: boolean,
 ): boolean {
   return kind === "unmapped" && traceStatus === "running" && !reduceMotion;
+}
+
+/** Counter-scale world-sized marks as the camera approaches the globe. */
+export function cameraCompensatedScale(
+  altitude: number,
+  referenceAltitude = DEFAULT_CAMERA_ALTITUDE,
+): number {
+  if (!Number.isFinite(altitude) || altitude <= 0) return 1;
+  return clamp(altitude / referenceAltitude, 0.06, 1.55);
+}
+
+/** Omit arcs whose city-level endpoints collapse to the same coordinate. */
+export function segmentHasVisibleDistance(
+  startLat: number,
+  startLng: number,
+  endLat: number,
+  endLng: number,
+): boolean {
+  const latDelta = Math.abs(startLat - endLat);
+  const lngDelta = Math.abs(((startLng - endLng + 540) % 360) - 180);
+  return latDelta > 0.001 || lngDelta > 0.001;
 }
 
 export function ambientRouteCandidates<T extends AmbientRouteCandidate>(
@@ -105,7 +176,19 @@ export function classifySegment(
 }
 
 export function buildPulsePathPoints(hops: GeoHop[]): PulsePoint[] {
-  const located = hops.filter(isLocated).sort((a, b) => a.ttl - b.ttl);
+  const located = hops
+    .filter(isLocated)
+    .sort((a, b) => a.ttl - b.ttl)
+    .filter(
+      (hop, index, sorted) =>
+        index === 0 ||
+        segmentHasVisibleDistance(
+          sorted[index - 1].lat,
+          sorted[index - 1].lon,
+          hop.lat,
+          hop.lon,
+        ),
+    );
   if (located.length < 2) return [];
   const points: PulsePoint[] = [];
   for (let i = 0; i < located.length - 1; i += 1) {
@@ -129,6 +212,30 @@ export function buildPulsePathPoints(hops: GeoHop[]): PulsePoint[] {
   return points;
 }
 
+/** Build only the newly revealed span of a progressively growing route. */
+export function buildNewHopPulsePath(
+  previousHops: GeoHop[],
+  nextHops: GeoHop[],
+): PulsePoint[] {
+  const previous = new Set(
+    previousHops.filter(isLocated).map(mappedHopKey),
+  );
+  const located = nextHops
+    .filter(isLocated)
+    .sort((a, b) => a.ttl - b.ttl);
+  const addedIndexes = located
+    .map((hop, index) => previous.has(mappedHopKey(hop)) ? -1 : index)
+    .filter((index) => index >= 0);
+  if (addedIndexes.length === 0 || located.length < 2) return [];
+
+  let start = Math.max(0, addedIndexes[0] - 1);
+  let end = addedIndexes[addedIndexes.length - 1];
+  // A location can arrive out of TTL order. Use the following known hop so
+  // the reveal still has a clear source and destination.
+  if (start === end && end < located.length - 1) end += 1;
+  return buildPulsePathPoints(located.slice(start, end + 1));
+}
+
 export function isLocated<T extends GeoHop>(
   hop: T,
 ): hop is T & { lat: number; lon: number } {
@@ -138,6 +245,10 @@ export function isLocated<T extends GeoHop>(
     Number.isFinite(hop.lat) &&
     Number.isFinite(hop.lon)
   );
+}
+
+function mappedHopKey(hop: GeoHop & { lat: number; lon: number }): string {
+  return `${hop.ttl}@${hop.lat.toFixed(4)},${hop.lon.toFixed(4)}`;
 }
 
 function latLngVector(lat: number, lng: number): Vector3 {
@@ -164,6 +275,57 @@ function vectorLatLng(vector: Vector3): { lat: number; lng: number } {
 
 function dot(a: Vector3, b: Vector3): number {
   return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+function normalizeMapLabel(label: string): string {
+  return label.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+function angularDistance(
+  a: GlobeLabelCandidate,
+  b: GlobeLabelCandidate,
+): number {
+  const latA = a.lat * (Math.PI / 180);
+  const latB = b.lat * (Math.PI / 180);
+  const latDelta = latB - latA;
+  const lngDelta = wrappedLongitudeDelta(a.lng, b.lng) * (Math.PI / 180);
+  const haversine =
+    Math.sin(latDelta / 2) ** 2 +
+    Math.cos(latA) * Math.cos(latB) * Math.sin(lngDelta / 2) ** 2;
+  return 2 * Math.asin(Math.min(1, Math.sqrt(haversine))) * (180 / Math.PI);
+}
+
+function labelsCollide(
+  a: GlobeLabelCandidate,
+  b: GlobeLabelCandidate,
+): boolean {
+  const averageLat = ((a.lat + b.lat) / 2) * (Math.PI / 180);
+  const horizontalDistance =
+    wrappedLongitudeDelta(a.lng, b.lng) *
+    Math.max(0.08, Math.abs(Math.cos(averageLat)));
+  const verticalDistance = Math.abs(a.lat - b.lat);
+  const horizontalClearance = labelHalfWidth(a) + labelHalfWidth(b) + 0.2;
+  const verticalClearance = a.size * 0.55 + b.size * 0.55 + 0.16;
+  return (
+    horizontalDistance < horizontalClearance &&
+    verticalDistance < verticalClearance
+  );
+}
+
+function labelHalfWidth(candidate: GlobeLabelCandidate): number {
+  // Optimer's average glyph is a little over half its cap height. Spaces and
+  // narrow punctuation contribute less, which keeps this conservative without
+  // hiding an excessive number of labels.
+  const visualCharacters = [...candidate.label].reduce(
+    (width, character) => width + (/\s|[.,'!:|]/.test(character) ? 0.35 : 0.58),
+    0,
+  );
+  return Math.max(candidate.size * 0.7, candidate.size * visualCharacters * 0.5);
+}
+
+function wrappedLongitudeDelta(a: number, b: number): number {
+  const direct = Math.abs(a - b) % 360;
+  return Math.min(direct, 360 - direct);
 }
 
 function slerp(a: Vector3, b: Vector3, omega: number, t: number): Vector3 {

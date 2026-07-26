@@ -78,7 +78,7 @@ async fn main() {
     let dbs = GeoDbs::load(city_path, asn_path);
     if dbs.city.is_none() {
         eprintln!(
-            "warning: city MMDB not loaded — lookups will return empty city fields \
+            "warning: city MMDB not loaded; lookups will return empty city fields \
              (set GEO_CITY_MMDB or place GeoLite2-City.mmdb under data/)"
         );
     }
