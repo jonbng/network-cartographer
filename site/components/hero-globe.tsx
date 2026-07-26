@@ -87,7 +87,7 @@ export function HeroGlobe() {
             </div>
           </header>
 
-          <span className="globe-demo-badge">Product preview · Sample data</span>
+          <span className="globe-demo-badge">Tool preview · Sample data</span>
           {status !== "ready" && (
             <p className="globe-fallback" aria-live="polite">
               {status === "error"
