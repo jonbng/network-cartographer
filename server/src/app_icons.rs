@@ -37,7 +37,7 @@ mod platform {
             }
             let mut random = [0_u8; 16];
             getrandom::getrandom(&mut random).ok()?;
-            let id = random.iter().map(|byte| format!("{byte:02x}")).collect();
+            let id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
             state.ids_by_path.insert(bundle.clone(), id.clone());
             state
                 .entries
