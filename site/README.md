@@ -23,7 +23,6 @@ The app exposes:
 - `/source`: redirects to the public repository
 - `/api/v1/geo`: validates public IP batches, rate-limits, caches, and proxies to the VPS
 - `/api/v1/egress`: locates the public client address observed by the hosting edge
-- `/api/v1/runs`: increments and reads the anonymous aggregate run count in Upstash Redis
 
 Before announcing the commands, publish at least one tagged GitHub Release so the `latest/download` assets exist.
 
@@ -47,16 +46,7 @@ GEO_PROVIDER_TOKEN=<same secret as GEO_SERVICE_TOKEN on the VPS>
 
 Never prefix these with `NEXT_PUBLIC_`.
 
-### Run counter
-
-Add the Upstash REST credentials to the Vercel project:
-
-```text
-UPSTASH_REDIS_REST_URL=https://<database>.upstash.io
-UPSTASH_REDIS_REST_TOKEN=<rest-token>
-```
-
-Successful release-build startups make a best-effort `POST /api/v1/runs`. The endpoint atomically increments `network-cartographer:runs:total`; `GET /api/v1/runs` returns the current count. It stores no client identifiers or request metadata in Redis and limits each observed client address to five increments per minute. Development builds do not report, and users can opt out with `NETCART_DISABLE_USAGE_PING=1`.
+The landing page uses Vercel Analytics custom events to count copy-button presses (`command_copy_button`) and native copies from the command text (`command_copy_manual`). Each event includes the selected platform (`unix` or `windows`).
 
 ### Behaviour
 

@@ -98,8 +98,6 @@ Connection, process, DNS-cache, and SNI observation data stays in the local CLI 
 
 The exit marker describes where the public internet sees this connection, not the device's physical location. VPN/proxy labels use explicit system proxy and default tunnel-interface evidence; an absence of evidence does not prove a direct connection.
 
-Release builds send one anonymous request to `https://mapmy.network/api/v1/runs` after a successful startup so the project can maintain an aggregate run count. The request contains no machine identifier, network activity, or process data, and failure never affects startup. Set `NETCART_DISABLE_USAGE_PING=1` to disable it.
-
 On Windows, destination identification watches changes in the current user's DNS client cache. Other platforms retain reverse DNS unless a local integration supplies exact TLS SNI. Integrations can discover the authenticated per-run feed in the `network-cartographer/runtime/observation-feed-<pid>.json` file below the user configuration directory, then POST `hostname`, `remoteIp`, and optional `remotePort`, `pid`, `localIp`, and `localPort` fields to its endpoint. The feed is loopback-only, uses a random bearer token, and is removed on normal shutdown.
 
 For offline geolocation, enable **Local geolocation** and provide MaxMind databases:

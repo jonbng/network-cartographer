@@ -53,6 +53,8 @@ export default function Home() {
       <footer className="page-footer">
         <span>MIT</span>
         <span aria-hidden="true">·</span>
+        <a href="https://jonathanb.dk">Jonathan Bangert</a>
+        <span aria-hidden="true">·</span>
         <a href="/source">source</a>
       </footer>
     </main>

@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { track } from "@vercel/analytics";
 
 const commands = {
   unix: "curl -fsSL https://mapmy.network/run | sh",
@@ -21,8 +22,24 @@ function detectPlatform(): Platform {
 export function CommandCard() {
   const [platform, setPlatform] = useState<Platform>(detectPlatform);
   const [copied, setCopied] = useState(false);
+  const commandRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    function trackManualCopy() {
+      const command = commandRef.current;
+      const selection = document.getSelection();
+      if (!command || !selection || selection.isCollapsed || selection.rangeCount === 0) return;
+      if (selection.getRangeAt(0).intersectsNode(command)) {
+        track("command_copy_manual", { platform });
+      }
+    }
+
+    document.addEventListener("copy", trackManualCopy);
+    return () => document.removeEventListener("copy", trackManualCopy);
+  }, [platform]);
 
   async function copyCommand() {
+    track("command_copy_button", { platform });
     await navigator.clipboard.writeText(commands[platform]);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1_600);
@@ -57,7 +74,7 @@ export function CommandCard() {
         <span className="prompt" aria-hidden="true">
           $
         </span>
-        <code>{commands[platform]}</code>
+        <code ref={commandRef}>{commands[platform]}</code>
         <button
           className={`copy-button${copied ? " copied" : ""}`}
           type="button"

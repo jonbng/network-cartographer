@@ -89,7 +89,6 @@ pub async fn run() -> Result<(), String> {
     let address = listener
         .local_addr()
         .map_err(|error| format!("could not read server address: {error}"))?;
-    report_successful_startup();
     let url = format!("http://{address}");
     let _feed_discovery = match FeedDiscovery::write(&url, &observation_token) {
         Ok(discovery) => Some(discovery),
@@ -514,32 +513,6 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
             }
         })
         .expect("spawn monitor poll loop");
-}
-
-const DEFAULT_RUNS_URL: &str = "https://mapmy.network/api/v1/runs";
-
-fn report_successful_startup() {
-    if cfg!(debug_assertions) || std::env::var_os("NETCART_DISABLE_USAGE_PING").is_some() {
-        return;
-    }
-
-    let url = std::env::var("NETWORK_CARTOGRAPHER_RUNS_URL")
-        .unwrap_or_else(|_| DEFAULT_RUNS_URL.to_string());
-    let _ = thread::Builder::new()
-        .name("usage-ping".into())
-        .spawn(move || {
-            let agent = ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(2))
-                .timeout_read(Duration::from_secs(2))
-                .user_agent(concat!(
-                    "netcart/",
-                    env!("CARGO_PKG_VERSION"),
-                    " (+https://mapmy.network)"
-                ))
-                .build();
-            // Best effort only: startup and shutdown never depend on telemetry.
-            let _ = agent.post(&url).call();
-        });
 }
 
 struct AdaptiveCadence {

@@ -1,6 +1,6 @@
 [package]
 name = "network-cartographer"
-version = "0.1.1"
+version = "0.2.1"
 description = "Live per-application network connection monitor with traceroute and globe visualization"
 authors = ["Jonathan Bangert <jonathan@bangert.dk>"]
 license = "MIT"

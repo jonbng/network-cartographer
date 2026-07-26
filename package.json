@@ -1,7 +1,7 @@
 {
   "name": "network-cartographer",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.1",
   "description": "Network Cartographer: a local CLI network monitor with a browser-based 3D globe UI",
   "author": "Jonathan Bangert",
   "license": "MIT",
