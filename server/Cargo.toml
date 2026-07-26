@@ -27,7 +27,7 @@ sysinfo = "0.33"
 thiserror = "2"
 parking_lot = "0.12"
 ureq = { version = "2", default-features = true, features = ["json"] }
-maxminddb = "0.24"
+maxminddb = "0.27"
 dirs = "6"
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
