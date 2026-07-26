@@ -1,7 +1,10 @@
+mod domains;
+mod events;
+mod native;
 mod process;
-mod sni;
 mod sockets;
-mod traffic;
+mod udp;
 
-pub use sni::SniCache;
-pub use sockets::{NativeTrafficStatus, SocketCollector};
+pub use domains::{DestinationNameCache, DestinationNamingStatus, OsDnsCollector, SniObservation};
+pub use events::CollectionStatus;
+pub use sockets::{NativeTrafficStatus, SocketCollector, UdpCollectionStatus};

@@ -34,6 +34,7 @@ function mountPrivacyModal(onAccept: () => void | Promise<void>): void {
           geo with a MaxMind GeoLite2 database.
         </li>
         <li>Connection lists and process names stay on this machine.</li>
+        <li>Local DNS cache entries and optional SNI observations may identify destination domains.</li>
         <li>Reverse DNS may be queried for hostnames and airport codes.</li>
         <li>Traceroute runs OS tools (<code>traceroute</code> / <code>tracert</code>) with limited concurrency.</li>
       </ul>

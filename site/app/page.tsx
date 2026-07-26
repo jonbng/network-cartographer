@@ -46,7 +46,7 @@ export default function Home() {
           </li>
         </ol>
         <p className="muted">
-          Limits: TCP focus. No HTTPS payload inspection. No cross-platform UDP peer map.
+          Limits: no payload inspection. UDP coverage includes connected sockets only.
         </p>
       </section>
 

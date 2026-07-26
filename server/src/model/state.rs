@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 use crate::resolve::HostnameCache;
 
 use super::{
-    is_local_or_private, AppEntry, AttributionSource, AttributionStats, Connection, DestKey,
-    DestStats, Protocol, SocketKey, SocketTrafficCounters, TrafficRate, UnattributedReason,
+    is_local_or_private, AppEntry, AttributionSource, AttributionStats, Connection,
+    ConnectionObservation, DestKey, DestStats, Protocol, SocketKey, SocketTrafficCounters,
+    TrafficRate, UnattributedReason,
 };
 
 #[derive(Debug)]
@@ -29,7 +30,12 @@ impl AppState {
     pub fn new(retain: Duration, external_only: bool, include_udp: bool) -> Self {
         Self {
             apps: HashMap::new(),
-            unattributed: empty_entry("Unattributed traffic", None, Instant::now()),
+            unattributed: empty_entry(
+                "Unattributed traffic",
+                None,
+                "__unattributed__",
+                Instant::now(),
+            ),
             retain,
             external_only,
             include_udp,
@@ -44,7 +50,12 @@ impl AppState {
 
     pub fn reset(&mut self) {
         self.apps.clear();
-        self.unattributed = empty_entry("Unattributed traffic", None, Instant::now());
+        self.unattributed = empty_entry(
+            "Unattributed traffic",
+            None,
+            "__unattributed__",
+            Instant::now(),
+        );
         self.missing_pid_count = 0;
         self.poll_count = 0;
         self.last_raw_connections = 0;
@@ -53,7 +64,11 @@ impl AppState {
         self.socket_traffic.clear();
     }
 
-    pub fn ingest(&mut self, connections: Vec<Connection>, hostnames: &mut HostnameCache) {
+    pub fn ingest(
+        &mut self,
+        connections: Vec<ConnectionObservation>,
+        hostnames: &mut HostnameCache,
+    ) {
         let now = Instant::now();
         let dt = self
             .last_poll_at
@@ -70,13 +85,19 @@ impl AppState {
             app.current_connections = 0;
             app.hits_per_sec = 0.0;
             app.traffic = None;
+            app.pids.clear();
+            app.processes.clear();
         }
         self.unattributed.current_connections = 0;
         self.unattributed.hits_per_sec = 0.0;
         self.unattributed.traffic = None;
+        self.unattributed.pids.clear();
+        self.unattributed.processes.clear();
         self.attribution = AttributionStats::default();
 
-        for conn in connections {
+        for observation in connections {
+            let active = observation.active;
+            let conn = observation.connection;
             if matches!(conn.protocol, Protocol::Udp) && !self.include_udp {
                 continue;
             }
@@ -87,59 +108,80 @@ impl AppState {
             if self.external_only && is_local_or_private(conn.remote.ip()) {
                 continue;
             }
-            kept += 1;
+            if active {
+                kept += 1;
+            }
             hostnames.request(conn.remote.ip());
+            let matched_name = conn.destination_name.clone();
+            let processes = conn.processes.clone();
 
             let socket_key = conn.socket_key();
-            let traffic_delta = conn.traffic_counters.map(|current| {
-                current_counter_keys.insert(socket_key.clone());
-                let previous = self.socket_traffic.insert(socket_key, current);
-                previous
-                    .map(|previous| SocketTrafficCounters {
-                        rx_bytes: current.rx_bytes.saturating_sub(previous.rx_bytes),
-                        tx_bytes: current.tx_bytes.saturating_sub(previous.tx_bytes),
-                    })
-                    .unwrap_or_default()
-            });
+            let traffic_delta = active
+                .then_some(conn.traffic_counters)
+                .flatten()
+                .map(|current| {
+                    current_counter_keys.insert(socket_key.clone());
+                    let previous = self.socket_traffic.insert(socket_key, current);
+                    previous
+                        .map(|previous| SocketTrafficCounters {
+                            rx_bytes: current.rx_bytes.saturating_sub(previous.rx_bytes),
+                            tx_bytes: current.tx_bytes.saturating_sub(previous.tx_bytes),
+                        })
+                        .unwrap_or_default()
+                });
 
             let entry = match conn.attribution {
                 AttributionSource::Direct => {
-                    self.attribution.direct += 1;
+                    if active {
+                        self.attribution.direct += 1;
+                    }
                     let key = app_key(&conn);
                     let display = connection_display_name(&conn, &key);
-                    self.apps
-                        .entry(key)
-                        .or_insert_with(|| empty_entry(&display, conn.process_path.clone(), now))
+                    self.apps.entry(key.clone()).or_insert_with(|| {
+                        empty_entry(&display, conn.process_path.clone(), &key, now)
+                    })
                 }
                 AttributionSource::Recovered => {
-                    self.attribution.recovered += 1;
+                    if active {
+                        self.attribution.recovered += 1;
+                    }
                     let key = app_key(&conn);
                     let display = connection_display_name(&conn, &key);
-                    self.apps
-                        .entry(key)
-                        .or_insert_with(|| empty_entry(&display, conn.process_path.clone(), now))
+                    self.apps.entry(key.clone()).or_insert_with(|| {
+                        empty_entry(&display, conn.process_path.clone(), &key, now)
+                    })
                 }
                 AttributionSource::Unattributed => {
-                    missing += 1;
-                    self.attribution.unattributed += 1;
-                    if matches!(
-                        conn.unattributed_reason,
-                        Some(UnattributedReason::Ambiguous)
-                    ) {
-                        self.attribution.ambiguous += 1;
-                    }
-                    if matches!(
-                        conn.unattributed_reason,
-                        Some(UnattributedReason::OwnerGone)
-                    ) {
-                        self.attribution.owner_gone += 1;
+                    if active {
+                        missing += 1;
+                        self.attribution.unattributed += 1;
+                        if matches!(
+                            conn.unattributed_reason,
+                            Some(UnattributedReason::Ambiguous)
+                        ) {
+                            self.attribution.ambiguous += 1;
+                        }
+                        if matches!(
+                            conn.unattributed_reason,
+                            Some(UnattributedReason::OwnerGone)
+                        ) {
+                            self.attribution.owner_gone += 1;
+                        }
+                        if matches!(
+                            conn.unattributed_reason,
+                            Some(UnattributedReason::AccessLimited)
+                        ) {
+                            self.attribution.access_limited += 1;
+                        }
                     }
                     &mut self.unattributed
                 }
             };
 
             entry.last_seen = now;
-            entry.current_connections += 1;
+            if active {
+                entry.current_connections += 1;
+            }
             if let Some(delta) = traffic_delta {
                 let rate = entry.traffic.get_or_insert(TrafficRate {
                     sample_window_ms: (dt * 1000.0).round() as u64,
@@ -154,6 +196,10 @@ impl AppState {
             if entry.path.is_none() {
                 entry.path = conn.process_path.clone();
             }
+            for process in &processes {
+                entry.pids.insert(process.pid);
+                entry.processes.insert(process.id.clone(), process.clone());
+            }
             let dest_key = DestKey::from_remote(conn.remote, conn.protocol);
             let hostname = hostnames.get(conn.remote.ip());
             let dest = entry
@@ -163,7 +209,9 @@ impl AppState {
                     remote: conn.remote,
                     hostname: hostname.clone(),
                     sni: None,
+                    domain: matched_name.clone(),
                     protocol: conn.protocol,
+                    process_ids: processes.iter().map(|process| process.id.clone()).collect(),
                     hit_count: 0,
                     first_seen: now,
                     last_seen: now,
@@ -174,6 +222,21 @@ impl AppState {
             }
             dest.last_seen = now;
             dest.protocol = conn.protocol;
+            dest.process_ids
+                .extend(processes.iter().map(|process| process.id.clone()));
+            if let Some(name) = matched_name {
+                let replace = dest.domain.as_ref().is_none_or(|current| {
+                    current.is_expired(now)
+                        || name.source.priority() > current.source.priority()
+                        || (name.source == current.source
+                            && name.observed_at >= current.observed_at)
+                });
+                if replace {
+                    dest.sni = (name.source == super::DestinationNameSource::TlsSni)
+                        .then(|| name.value.clone());
+                    dest.domain = Some(name);
+                }
+            }
             if dest.hostname.is_none() {
                 dest.hostname = hostname;
             } else if let Some(h) = hostname {
@@ -185,6 +248,22 @@ impl AppState {
         self.last_raw_connections = kept;
         self.socket_traffic
             .retain(|key, _| current_counter_keys.contains(key));
+
+        // Process ownership describes the current snapshot. Keeping helper
+        // identities forever made long-running applications accumulate stale
+        // PIDs and left destination references pointing at dead processes.
+        for app in self
+            .apps
+            .values_mut()
+            .chain(std::iter::once(&mut self.unattributed))
+        {
+            let current_processes: HashSet<_> = app.processes.keys().cloned().collect();
+            for destination in app.destinations.values_mut() {
+                destination
+                    .process_ids
+                    .retain(|id| current_processes.contains(id));
+            }
+        }
 
         // Age out stale destinations / apps
         let retain = self.retain;
@@ -204,6 +283,14 @@ impl AppState {
             .chain(std::iter::once(&mut self.unattributed))
         {
             for dest in app.destinations.values_mut() {
+                if dest
+                    .domain
+                    .as_ref()
+                    .is_some_and(|name| name.is_expired(now))
+                {
+                    dest.domain = None;
+                    dest.sni = None;
+                }
                 if let Some(h) = hostnames.get(dest.remote.ip()) {
                     dest.hostname = Some(h);
                 }
@@ -211,16 +298,15 @@ impl AppState {
         }
     }
 
-    pub fn apply_sni(&mut self, remote: IpAddr, sni: &str) {
+    pub fn clear_destination_names(&mut self) {
         for app in self
             .apps
             .values_mut()
             .chain(std::iter::once(&mut self.unattributed))
         {
             for dest in app.destinations.values_mut() {
-                if dest.remote.ip() == remote {
-                    dest.sni = Some(sni.to_string());
-                }
+                dest.domain = None;
+                dest.sni = None;
             }
         }
     }
@@ -264,11 +350,13 @@ impl AppState {
     }
 }
 
-fn empty_entry(name: &str, path: Option<std::path::PathBuf>, now: Instant) -> AppEntry {
+fn empty_entry(name: &str, path: Option<std::path::PathBuf>, id: &str, now: Instant) -> AppEntry {
     AppEntry {
+        id: id.to_string(),
         name: name.to_string(),
         path,
         pids: BTreeSet::new(),
+        processes: Default::default(),
         destinations: HashMap::new(),
         last_seen: now,
         hits_per_sec: 0.0,
@@ -288,6 +376,11 @@ fn connection_display_name(conn: &Connection, key: &str) -> String {
 /// Sticky identity: prefer full exe path (stable across renames of short name),
 /// fall back to process name, then pid.
 fn app_key(conn: &Connection) -> String {
+    if let Some(id) = &conn.application_id {
+        if !id.is_empty() {
+            return id.clone();
+        }
+    }
     if let Some(path) = &conn.process_path {
         let s = path.to_string_lossy();
         if !s.is_empty() {
@@ -307,7 +400,7 @@ fn app_key(conn: &Connection) -> String {
 pub fn display_name_for(app: &AppEntry) -> String {
     if let Some(path) = &app.path {
         if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-            return name.to_string();
+            return name.strip_suffix(".app").unwrap_or(name).to_string();
         }
     }
     // key may be full path
@@ -328,24 +421,30 @@ mod tests {
     use std::net::SocketAddr;
     use std::path::PathBuf;
 
-    fn connection(attribution: AttributionSource, is_new: bool) -> Connection {
+    fn connection(attribution: AttributionSource, is_new: bool) -> ConnectionObservation {
         let attributed = !matches!(attribution, AttributionSource::Unattributed);
-        Connection {
-            pid: attributed.then_some(42),
-            process_name: if attributed {
-                "browser".into()
-            } else {
-                String::new()
+        ConnectionObservation {
+            active: true,
+            connection: Connection {
+                application_id: None,
+                pid: attributed.then_some(42),
+                process_name: if attributed {
+                    "browser".into()
+                } else {
+                    String::new()
+                },
+                process_path: attributed.then(|| PathBuf::from("/usr/bin/browser")),
+                processes: Vec::new(),
+                local: "127.0.0.1:45123".parse::<SocketAddr>().unwrap(),
+                remote: "203.0.113.10:443".parse::<SocketAddr>().unwrap(),
+                protocol: Protocol::Tcp,
+                state: ConnState::Established,
+                attribution,
+                unattributed_reason: (!attributed).then_some(UnattributedReason::OwnerGone),
+                is_new,
+                traffic_counters: None,
+                destination_name: None,
             },
-            process_path: attributed.then(|| PathBuf::from("/usr/bin/browser")),
-            local: "127.0.0.1:45123".parse::<SocketAddr>().unwrap(),
-            remote: "203.0.113.10:443".parse::<SocketAddr>().unwrap(),
-            protocol: Protocol::Tcp,
-            state: ConnState::Established,
-            attribution,
-            unattributed_reason: (!attributed).then_some(UnattributedReason::OwnerGone),
-            is_new,
-            traffic_counters: None,
         }
     }
 
@@ -403,7 +502,7 @@ mod tests {
         let mut state = AppState::new(Duration::from_secs(45), false, false);
         let mut hostnames = HostnameCache::new();
         let mut conn = connection(AttributionSource::Direct, true);
-        conn.traffic_counters = Some(SocketTrafficCounters {
+        conn.connection.traffic_counters = Some(SocketTrafficCounters {
             rx_bytes: 100,
             tx_bytes: 200,
         });
@@ -411,8 +510,8 @@ mod tests {
         let first = state.apps.get("/usr/bin/browser").unwrap().traffic.unwrap();
         assert_eq!(first.total_bytes_per_sec(), 0.0);
 
-        conn.is_new = false;
-        conn.traffic_counters = Some(SocketTrafficCounters {
+        conn.connection.is_new = false;
+        conn.connection.traffic_counters = Some(SocketTrafficCounters {
             rx_bytes: 300,
             tx_bytes: 500,
         });
@@ -421,5 +520,20 @@ mod tests {
         // Poll intervals are clamped to 200ms for stable activity rates.
         assert_eq!(second.rx_bytes_per_sec, 1_000.0);
         assert_eq!(second.tx_bytes_per_sec, 1_500.0);
+    }
+
+    #[test]
+    fn historical_observation_updates_hits_but_not_live_counts() {
+        let mut state = AppState::new(Duration::from_secs(45), false, false);
+        let mut hostnames = HostnameCache::new();
+        let mut observation = connection(AttributionSource::Unattributed, true);
+        observation.active = false;
+        observation.connection.state = ConnState::Closed;
+        state.ingest(vec![observation], &mut hostnames);
+
+        assert_eq!(state.last_raw_connections, 0);
+        assert_eq!(state.unattributed().current_connections, 0);
+        assert_eq!(state.unattributed().connection_hits(), 1);
+        assert_eq!(state.missing_pid_count, 0);
     }
 }

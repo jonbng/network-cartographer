@@ -2,6 +2,43 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationNameSource {
+    TlsSni,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    OsDns,
+}
+
+impl DestinationNameSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TlsSni => "tls-sni",
+            Self::OsDns => "os-dns",
+        }
+    }
+
+    pub fn priority(self) -> u8 {
+        match self {
+            Self::TlsSni => 2,
+            Self::OsDns => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DestinationName {
+    pub value: String,
+    pub source: DestinationNameSource,
+    pub observed_at: Instant,
+    pub expires_at: Instant,
+}
+
+impl DestinationName {
+    pub fn is_expired(&self, now: Instant) -> bool {
+        now >= self.expires_at
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Protocol {
     Tcp,
@@ -40,6 +77,7 @@ pub enum AttributionSource {
 pub enum UnattributedReason {
     OwnerGone,
     Ambiguous,
+    AccessLimited,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -49,6 +87,21 @@ pub struct AttributionStats {
     pub unattributed: usize,
     pub ambiguous: usize,
     pub owner_gone: usize,
+    pub access_limited: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub id: String,
+    pub pid: u32,
+    pub start_time: u64,
+    pub name: String,
+    pub path: Option<PathBuf>,
+    pub parent_pid: Option<u32>,
+    pub app_id: String,
+    pub app_name: String,
+    pub app_path: Option<PathBuf>,
+    pub is_app_root: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -60,9 +113,13 @@ pub struct SocketKey {
 
 #[derive(Debug, Clone)]
 pub struct Connection {
+    pub application_id: Option<String>,
     pub pid: Option<u32>,
     pub process_name: String,
     pub process_path: Option<PathBuf>,
+    /// Concrete processes that own this socket. The legacy pid/name/path
+    /// fields above describe the resolved parent application.
+    pub processes: Vec<ProcessIdentity>,
     #[allow(dead_code)]
     pub local: SocketAddr,
     pub remote: SocketAddr,
@@ -74,6 +131,16 @@ pub struct Connection {
     /// True only on the first snapshot in which this exact socket exists.
     pub is_new: bool,
     pub traffic_counters: Option<SocketTrafficCounters>,
+    /// Best local domain evidence matched to this connection.
+    pub destination_name: Option<DestinationName>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectionObservation {
+    pub connection: Connection,
+    /// Historical observations update activity and destinations without being
+    /// counted as sockets that are still active at snapshot time.
+    pub active: bool,
 }
 
 impl Connection {
@@ -128,7 +195,9 @@ pub struct DestStats {
     pub hostname: Option<String>,
     /// TLS SNI if captured
     pub sni: Option<String>,
+    pub domain: Option<DestinationName>,
     pub protocol: Protocol,
+    pub process_ids: std::collections::BTreeSet<String>,
     pub hit_count: u64,
     #[allow(dead_code)]
     pub first_seen: Instant,
@@ -145,9 +214,11 @@ impl DestStats {
 
 #[derive(Debug, Clone)]
 pub struct AppEntry {
+    pub id: String,
     pub name: String,
     pub path: Option<PathBuf>,
     pub pids: std::collections::BTreeSet<u32>,
+    pub processes: std::collections::BTreeMap<String, ProcessIdentity>,
     pub destinations: std::collections::HashMap<DestKey, DestStats>,
     pub last_seen: Instant,
     /// Newly opened sockets per second over the latest poll interval.

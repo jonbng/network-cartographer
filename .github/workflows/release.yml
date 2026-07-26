@@ -32,12 +32,15 @@ jobs:
           - os: windows-latest
             artifact: windows-x86_64
             archive: network-cartographer-windows-x86_64.zip
+          - os: windows-11-arm
+            artifact: windows-arm64
+            archive: network-cartographer-windows-arm64.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -99,7 +102,7 @@ jobs:
             curl -fsSL https://mapmy.network/run | sh
             ```
 
-            Windows PowerShell:
+            Windows PowerShell (x64 or ARM64):
 
             ```powershell
             irm https://mapmy.network/run.ps1 | iex

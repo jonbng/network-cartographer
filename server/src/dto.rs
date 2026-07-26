@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::collect::NativeTrafficStatus;
+use crate::collect::{
+    CollectionStatus, DestinationNamingStatus, NativeTrafficStatus, UdpCollectionStatus,
+};
 use crate::geo::{AsnDb, GeoCache, GeoHop, PathGeoCache};
 use crate::model::{display_name_for, AppEntry, AppState, DestStats};
 use crate::trace::{TraceEngine, TraceStatus};
@@ -18,6 +20,9 @@ pub struct SnapshotDto {
     pub attribution: AttributionStatsDto,
     pub unattributed: Option<TrafficGroupDto>,
     pub monitoring: MonitoringDto,
+    pub collection: CollectionDto,
+    pub destination_naming: DestinationNamingDto,
+    pub udp_monitoring: UdpMonitoringDto,
     pub external_only: bool,
     pub include_udp: bool,
     pub traces_enabled: bool,
@@ -44,6 +49,7 @@ pub struct AppDto {
     pub name: String,
     pub path: Option<String>,
     pub pids: Vec<u32>,
+    pub processes: Vec<ProcessDto>,
     pub dest_count: usize,
     pub hits: u64,
     pub hits_per_sec: f64,
@@ -52,6 +58,18 @@ pub struct AppDto {
     pub new_connections_per_sec: f64,
     pub traffic: Option<TrafficRateDto>,
     pub destinations: Vec<DestDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessDto {
+    pub id: String,
+    pub pid: u32,
+    pub start_time: u64,
+    pub name: String,
+    pub path: Option<String>,
+    pub parent_pid: Option<u32>,
+    pub is_app_root: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +99,7 @@ pub struct AttributionStatsDto {
     pub unattributed: usize,
     pub ambiguous: usize,
     pub owner_gone: usize,
+    pub access_limited: usize,
     pub ratio: f64,
 }
 
@@ -88,6 +107,38 @@ pub struct AttributionStatsDto {
 #[serde(rename_all = "camelCase")]
 pub struct MonitoringDto {
     pub mode: String,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionDto {
+    pub mode: String,
+    pub source: String,
+    pub captures_opens: bool,
+    pub captures_closes: bool,
+    pub dropped_events: u64,
+    pub status: String,
+    pub message: String,
+    pub udp_remote: bool,
+    pub access_limited: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationNamingDto {
+    pub enabled: bool,
+    pub status: String,
+    pub sources: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UdpMonitoringDto {
+    pub enabled: bool,
+    pub coverage: String,
     pub status: String,
     pub message: String,
 }
@@ -103,6 +154,9 @@ pub struct DestDto {
     pub hits: u64,
     pub last_seen_secs: u64,
     pub sni: Option<String>,
+    pub domain: Option<String>,
+    pub domain_source: String,
+    pub process_ids: Vec<String>,
     pub asn: Option<u32>,
     pub org: Option<String>,
     pub path_changed: bool,
@@ -141,6 +195,7 @@ pub struct HopDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SettingsDto {
+    pub settings_version: u32,
     pub external_only: bool,
     pub include_udp: bool,
     pub traces_enabled: bool,
@@ -149,7 +204,7 @@ pub struct SettingsDto {
     pub show_low_confidence: bool,
     pub confidence_min: f64,
     pub globe_density: String,
-    pub capture_sni: bool,
+    pub identify_domains: bool,
     pub history_enabled: bool,
     pub enhanced_monitoring: bool,
     /// User accepted first-run privacy notice (GeoIP / local monitoring).
@@ -159,15 +214,16 @@ pub struct SettingsDto {
 impl Default for SettingsDto {
     fn default() -> Self {
         Self {
+            settings_version: 2,
             external_only: true,
-            include_udp: false,
+            include_udp: true,
             traces_enabled: true,
             poll_interval_ms: 1000,
             geo_local_only: false,
             show_low_confidence: true,
             confidence_min: 0.45,
             globe_density: "all".into(),
-            capture_sni: false,
+            identify_domains: true,
             history_enabled: false,
             enhanced_monitoring: false,
             privacy_accepted: false,
@@ -184,38 +240,25 @@ pub struct PathChangedEvent {
     pub summary: String,
 }
 
-struct DtoContext<'a> {
-    traces: &'a TraceEngine,
-    geo: &'a GeoCache,
-    path_geo: &'a PathGeoCache,
-    asn: &'a AsnDb,
-    settings: &'a SettingsDto,
-    path_changed: &'a std::collections::HashSet<String>,
+pub struct SnapshotContext<'a> {
+    pub traces: &'a TraceEngine,
+    pub geo: &'a GeoCache,
+    pub path_geo: &'a PathGeoCache,
+    pub asn: &'a AsnDb,
+    pub settings: &'a SettingsDto,
+    pub path_changed: &'a std::collections::HashSet<String>,
+    pub traffic_status: &'a NativeTrafficStatus,
+    pub collection_status: &'a CollectionStatus,
+    pub destination_naming: &'a DestinationNamingStatus,
+    pub udp_status: &'a UdpCollectionStatus,
 }
 
-pub fn build_snapshot(
-    state: &AppState,
-    traces: &TraceEngine,
-    geo: &GeoCache,
-    path_geo: &PathGeoCache,
-    asn: &AsnDb,
-    settings: &SettingsDto,
-    path_changed: &std::collections::HashSet<String>,
-    traffic_status: &NativeTrafficStatus,
-) -> SnapshotDto {
-    let ts = traces.stats();
-    let context = DtoContext {
-        traces,
-        geo,
-        path_geo,
-        asn,
-        settings,
-        path_changed,
-    };
+pub fn build_snapshot(state: &AppState, context: &SnapshotContext<'_>) -> SnapshotDto {
+    let ts = context.traces.stats();
     let apps: Vec<AppDto> = state
         .sorted_apps()
         .into_iter()
-        .map(|app| app_to_dto(app, &context))
+        .map(|app| app_to_dto(app, context))
         .collect();
     let attributed = state.attribution.direct + state.attribution.recovered;
     let total = attributed + state.attribution.unattributed;
@@ -230,7 +273,7 @@ pub fn build_snapshot(
             destinations: unattributed
                 .sorted_destinations()
                 .into_iter()
-                .map(|dest| dest_to_dto(unattributed, dest, &context))
+                .map(|dest| dest_to_dto(unattributed, dest, context))
                 .collect(),
         })
     };
@@ -246,6 +289,7 @@ pub fn build_snapshot(
             unattributed: state.attribution.unattributed,
             ambiguous: state.attribution.ambiguous,
             owner_gone: state.attribution.owner_gone,
+            access_limited: state.attribution.access_limited,
             ratio: if total == 0 {
                 1.0
             } else {
@@ -253,10 +297,33 @@ pub fn build_snapshot(
             },
         },
         unattributed,
-        monitoring: monitoring_to_dto(traffic_status),
+        monitoring: monitoring_to_dto(context.traffic_status),
+        collection: CollectionDto {
+            mode: context.collection_status.mode.into(),
+            source: context.collection_status.source.into(),
+            captures_opens: context.collection_status.captures_opens,
+            captures_closes: context.collection_status.captures_closes,
+            dropped_events: context.collection_status.dropped_events,
+            status: context.collection_status.status.into(),
+            message: context.collection_status.message.clone(),
+            udp_remote: context.collection_status.udp_remote,
+            access_limited: context.collection_status.access_limited,
+        },
+        destination_naming: DestinationNamingDto {
+            enabled: context.settings.identify_domains,
+            status: context.destination_naming.status.into(),
+            sources: context
+                .destination_naming
+                .sources
+                .iter()
+                .map(|source| (*source).into())
+                .collect(),
+            message: context.destination_naming.message.clone(),
+        },
+        udp_monitoring: udp_monitoring_to_dto(context.settings.include_udp, context.udp_status),
         external_only: state.external_only,
         include_udp: state.include_udp,
-        traces_enabled: traces.enabled(),
+        traces_enabled: context.traces.enabled(),
         trace_stats: TraceStatsDto {
             queued: ts.queued,
             running: ts.running,
@@ -264,14 +331,33 @@ pub fn build_snapshot(
             failed: ts.failed,
         },
         apps,
-        geo_backend: geo.backend_label(settings.geo_local_only, asn.loaded()),
-        geo_mmdb: geo.mmdb_loaded(),
-        geo_asn_mmdb: asn.loaded(),
-        settings: settings.clone(),
+        geo_backend: context
+            .geo
+            .backend_label(context.settings.geo_local_only, context.asn.loaded()),
+        geo_mmdb: context.geo.mmdb_loaded(),
+        geo_asn_mmdb: context.asn.loaded(),
+        settings: context.settings.clone(),
     }
 }
 
-fn app_to_dto(app: &AppEntry, context: &DtoContext<'_>) -> AppDto {
+fn udp_monitoring_to_dto(enabled: bool, status: &UdpCollectionStatus) -> UdpMonitoringDto {
+    let (state, message) = match status {
+        UdpCollectionStatus::Disabled => {
+            ("disabled", "Connected UDP collection is disabled".into())
+        }
+        UdpCollectionStatus::Ready => ("ready", "Connected UDP peers are being collected".into()),
+        UdpCollectionStatus::Degraded(message) => ("degraded", message.clone()),
+        UdpCollectionStatus::Unavailable(message) => ("unavailable", message.clone()),
+    };
+    UdpMonitoringDto {
+        enabled,
+        coverage: "connected".into(),
+        status: state.into(),
+        message,
+    }
+}
+
+fn app_to_dto(app: &AppEntry, context: &SnapshotContext<'_>) -> AppDto {
     let destinations: Vec<DestDto> = app
         .sorted_destinations()
         .into_iter()
@@ -279,17 +365,29 @@ fn app_to_dto(app: &AppEntry, context: &DtoContext<'_>) -> AppDto {
         .collect();
 
     let name = display_name_for(app);
-    let id = app
-        .path
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| app.name.clone());
+    let id = app.id.clone();
 
     AppDto {
         id,
         name,
         path: app.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
         pids: app.pids.iter().copied().collect(),
+        processes: app
+            .processes
+            .values()
+            .map(|process| ProcessDto {
+                id: process.id.clone(),
+                pid: process.pid,
+                start_time: process.start_time,
+                name: process.name.clone(),
+                path: process
+                    .path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                parent_pid: process.parent_pid,
+                is_app_root: process.is_app_root,
+            })
+            .collect(),
         dest_count: app.destinations.len(),
         hits: app.connection_hits(),
         hits_per_sec: app.hits_per_sec,
@@ -338,7 +436,7 @@ fn monitoring_to_dto(status: &NativeTrafficStatus) -> MonitoringDto {
     }
 }
 
-fn dest_to_dto(app: &AppEntry, d: &DestStats, context: &DtoContext<'_>) -> DestDto {
+fn dest_to_dto(app: &AppEntry, d: &DestStats, context: &SnapshotContext<'_>) -> DestDto {
     let status = context.traces.get(d.remote.ip());
     let ip = d.remote.ip();
     let asn_info = context.asn.lookup(ip);
@@ -353,6 +451,14 @@ fn dest_to_dto(app: &AppEntry, d: &DestStats, context: &DtoContext<'_>) -> DestD
         hits: d.hit_count,
         last_seen_secs: d.last_seen.elapsed().as_secs(),
         sni: d.sni.clone(),
+        domain: d.domain.as_ref().map(|name| name.value.clone()),
+        domain_source: d
+            .domain
+            .as_ref()
+            .map(|name| name.source.as_str().to_string())
+            .or_else(|| d.hostname.as_ref().map(|_| "reverse-dns".into()))
+            .unwrap_or_else(|| "ip".into()),
+        process_ids: d.process_ids.iter().cloned().collect(),
         asn: asn_info.as_ref().map(|a| a.asn),
         org: asn_info.map(|a| a.org),
         path_changed: context.path_changed.contains(&change_key),
@@ -367,9 +473,9 @@ fn dest_to_dto(app: &AppEntry, d: &DestStats, context: &DtoContext<'_>) -> DestD
 }
 
 fn display_host_for(d: &DestStats) -> String {
-    if let Some(sni) = &d.sni {
-        if !sni.is_empty() {
-            return sni.clone();
+    if let Some(domain) = &d.domain {
+        if !domain.value.is_empty() {
+            return domain.value.clone();
         }
     }
     if let Some(h) = &d.hostname {
@@ -520,6 +626,7 @@ mod tests {
         assert_eq!(s.poll_interval_ms, 2000);
         assert!(!s.privacy_accepted);
         assert_eq!(s.globe_density, "all");
+        assert!(s.identify_domains);
     }
 
     #[test]

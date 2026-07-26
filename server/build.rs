@@ -1,6 +1,14 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        cc::Build::new()
+            .file("src/collect/udp/macos.c")
+            .warnings(true)
+            .compile("netcart_udp_macos");
+        println!("cargo:rerun-if-changed=src/collect/udp/macos.c");
+    }
+
     println!("cargo:rerun-if-changed=../ui");
     println!("cargo:rerun-if-changed=../package.json");
     println!("cargo:rerun-if-changed=../vite.config.ts");

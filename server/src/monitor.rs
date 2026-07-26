@@ -4,9 +4,11 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
-use crate::collect::{SniCache, SocketCollector};
+use crate::collect::{
+    DestinationNameCache, DestinationNamingStatus, OsDnsCollector, SniObservation, SocketCollector,
+};
 use crate::dto::PathChangedEvent;
-use crate::dto::{build_snapshot, SettingsDto, SnapshotDto};
+use crate::dto::{build_snapshot, SettingsDto, SnapshotContext, SnapshotDto};
 use crate::geo::{pending_ips, AsnDb, GeoCache, PathGeoCache};
 use crate::model::{display_name_for, AppState};
 use crate::resolve::HostnameCache;
@@ -24,8 +26,8 @@ pub struct Monitor {
     pub path_geo: PathGeoCache,
     pub asn: AsnDb,
     pub settings: Mutex<SettingsDto>,
-    /// Best-effort TLS SNI map (fed via `record_sni` / future pcap).
-    pub sni: SniCache,
+    pub destination_names: DestinationNameCache,
+    dns_collector: Mutex<OsDnsCollector>,
     /// Previous hop fingerprint per "app|ip"
     path_fps: Mutex<HashMap<String, u64>>,
     /// Keys that changed this cycle
@@ -34,10 +36,7 @@ pub struct Monitor {
 
 impl Monitor {
     pub fn new() -> Self {
-        let mut settings = settings_store::load().unwrap_or_default();
-        // Keep accepting the old setting on disk, but do not claim UDP support
-        // until the collector can obtain remote UDP peers cross-platform.
-        settings.include_udp = false;
+        let settings = settings_store::load().unwrap_or_default();
         let retain = Duration::from_secs(45);
         let trace_cfg = TraceConfig {
             enabled: settings.traces_enabled,
@@ -57,7 +56,8 @@ impl Monitor {
             path_geo: PathGeoCache::new(),
             asn: AsnDb::new(),
             settings: Mutex::new(settings),
-            sni: SniCache::new(),
+            destination_names: DestinationNameCache::new(),
+            dns_collector: Mutex::new(OsDnsCollector::default()),
             path_fps: Mutex::new(HashMap::new()),
             path_changed: Mutex::new(HashSet::new()),
         }
@@ -76,19 +76,20 @@ impl Monitor {
             state.include_udp = settings.include_udp;
         }
 
-        let connections = self
+        let mut connections = self
             .collector
             .lock()
             .snapshot(settings.include_udp, settings.enhanced_monitoring)
             .map_err(|e| e.to_string())?;
 
+        if settings.identify_domains {
+            self.destination_names.enrich(&mut connections);
+        }
+
         {
             let mut state = self.state.lock();
             let mut hostnames = self.hostnames.lock();
             state.ingest(connections, &mut hostnames);
-            if settings.capture_sni {
-                self.sni.apply_to_state(&mut state);
-            }
         }
 
         {
@@ -111,35 +112,79 @@ impl Monitor {
         // pending_geo_ips(), and detect_path_changes().
         let mut traces = self.traces.lock();
         traces.poll();
+        let destination_naming = self.destination_naming_status();
         let state = self.state.lock();
         let settings = self.settings.lock().clone();
-        let traffic_status = self.collector.lock().traffic_status();
+        let collector = self.collector.lock();
+        let traffic_status = collector.traffic_status();
+        let collection_status = collector.collection_status();
+        let udp_status = collector.udp_status();
+        drop(collector);
         let changed = self.path_changed.lock().clone();
         build_snapshot(
             &state,
-            &traces,
-            &self.geo,
-            &self.path_geo,
-            &self.asn,
-            &settings,
-            &changed,
-            &traffic_status,
+            &SnapshotContext {
+                traces: &traces,
+                geo: &self.geo,
+                path_geo: &self.path_geo,
+                asn: &self.asn,
+                settings: &settings,
+                path_changed: &changed,
+                traffic_status: &traffic_status,
+                collection_status: &collection_status,
+                destination_naming: &destination_naming,
+                udp_status: &udp_status,
+            },
         )
     }
 
+    pub fn collection_events_pending(&self) -> bool {
+        self.collector.lock().events_pending()
+    }
+
+    pub fn poll_domain_sources(&self) {
+        let settings = self.settings.lock().clone();
+        if settings.privacy_accepted && settings.identify_domains {
+            self.dns_collector.lock().poll(&self.destination_names);
+        }
+    }
+
+    pub fn destination_naming_status(&self) -> DestinationNamingStatus {
+        if !self.settings.lock().identify_domains {
+            return DestinationNamingStatus {
+                status: "disabled",
+                sources: Vec::new(),
+                message: "Destination domain identification is disabled".into(),
+            };
+        }
+        self.dns_collector.lock().status()
+    }
+
+    pub fn record_sni(&self, observation: SniObservation) -> Result<(), String> {
+        if !self.settings.lock().identify_domains {
+            return Err("destination domain identification is disabled".into());
+        }
+        self.destination_names.record_sni(observation)
+    }
+
     pub fn apply_settings(&self, mut settings: SettingsDto) {
-        settings.include_udp = false;
-        let traces_changed = {
+        settings.settings_version = 2;
+        let (traces_changed, domains_disabled) = {
             let mut current = self.settings.lock();
             let changed = current.traces_enabled != settings.traces_enabled;
+            let domains_disabled = current.identify_domains && !settings.identify_domains;
             *current = settings.clone();
-            changed
+            (changed, domains_disabled)
         };
         let _ = settings_store::save(&settings);
         {
             let mut state = self.state.lock();
             state.external_only = settings.external_only;
             state.include_udp = settings.include_udp;
+        }
+        if domains_disabled {
+            self.destination_names.clear();
+            self.state.lock().clear_destination_names();
         }
         if traces_changed {
             let cfg = TraceConfig {
@@ -153,6 +198,7 @@ impl Monitor {
 
     pub fn reset(&self) {
         self.collector.lock().reset();
+        self.destination_names.clear();
         self.state.lock().reset();
         self.traces.lock().clear_cache();
         self.path_geo.clear();

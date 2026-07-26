@@ -1,14 +1,17 @@
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
 
 use crate::model::{
-    AttributionSource, ConnState, Connection, Protocol, SocketKey, UnattributedReason,
+    AttributionSource, ConnState, Connection, ConnectionObservation, ProcessIdentity, SocketKey,
+    UnattributedReason,
 };
 
-use super::process;
-use super::traffic;
+use super::events::{CollectionStatus, LifecycleEvents};
+use super::{native, process};
+
+const OBSERVED_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Default)]
 pub enum NativeTrafficStatus {
@@ -18,234 +21,389 @@ pub enum NativeTrafficStatus {
     Unavailable(String),
 }
 
+#[derive(Debug, Clone, Default)]
+pub enum UdpCollectionStatus {
+    #[default]
+    Disabled,
+    Ready,
+    Degraded(String),
+    Unavailable(String),
+}
+
 #[derive(Debug, Clone)]
-struct Owner {
-    pid: u32,
-    name: String,
-    path: Option<std::path::PathBuf>,
+struct OwnerGroup {
+    app_id: String,
+    app_name: String,
+    app_path: Option<std::path::PathBuf>,
+    processes: Vec<ProcessIdentity>,
 }
 
-impl Owner {
-    fn identity(&self) -> String {
-        self.path
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned())
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| {
-                if self.name.is_empty() || self.name == "unknown" {
-                    format!("pid:{}", self.pid)
-                } else {
-                    self.name.clone()
-                }
-            })
-    }
+#[derive(Debug, Clone)]
+struct ObservedSocket {
+    owner: Option<OwnerGroup>,
+    active: bool,
+    last_seen: Instant,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SocketCollector {
-    observed: HashMap<SocketKey, Option<Owner>>,
+    observed: HashMap<SocketKey, ObservedSocket>,
     traffic_status: NativeTrafficStatus,
+    udp_status: UdpCollectionStatus,
+    events: LifecycleEvents,
+    native_source: &'static str,
+    udp_remote: bool,
+    access_limited: usize,
+    native_warnings: Vec<String>,
+}
+
+impl Default for SocketCollector {
+    fn default() -> Self {
+        Self {
+            observed: HashMap::new(),
+            traffic_status: NativeTrafficStatus::Disabled,
+            udp_status: UdpCollectionStatus::Disabled,
+            events: LifecycleEvents::default(),
+            native_source: if cfg!(target_os = "linux") {
+                "linux-sock-diag"
+            } else if cfg!(target_os = "macos") {
+                "macos-libproc"
+            } else {
+                "windows-ip-helper"
+            },
+            udp_remote: cfg!(any(target_os = "linux", target_os = "macos")),
+            access_limited: 0,
+            native_warnings: Vec::new(),
+        }
+    }
 }
 
 impl SocketCollector {
     fn attribute(
         &mut self,
         key: &SocketKey,
-        mut owners: Vec<Owner>,
+        mut owners: Vec<ProcessIdentity>,
+        access_limited: bool,
     ) -> (
-        Option<Owner>,
+        Option<OwnerGroup>,
         AttributionSource,
         Option<UnattributedReason>,
         bool,
     ) {
-        let is_new = !self.observed.contains_key(key);
-        owners.sort_by_key(Owner::identity);
-        owners.dedup_by(|a, b| a.identity() == b.identity());
-        let result = match owners.len() {
-            1 => (owners.pop(), AttributionSource::Direct, None, is_new),
-            0 => match self.observed.get(key).and_then(Clone::clone) {
+        let is_new = !self
+            .observed
+            .get(key)
+            .is_some_and(|observed| observed.active);
+        owners.sort_by(|a, b| a.id.cmp(&b.id));
+        owners.dedup_by(|a, b| a.id == b.id);
+
+        let mut app_ids: Vec<_> = owners.iter().map(|owner| owner.app_id.as_str()).collect();
+        app_ids.sort_unstable();
+        app_ids.dedup();
+        let result = if app_ids.len() == 1 {
+            let first = &owners[0];
+            (
+                Some(OwnerGroup {
+                    app_id: first.app_id.clone(),
+                    app_name: first.app_name.clone(),
+                    app_path: first.app_path.clone(),
+                    processes: owners,
+                }),
+                AttributionSource::Direct,
+                None,
+                is_new,
+            )
+        } else if app_ids.is_empty() {
+            match self.observed.get(key).and_then(|entry| entry.owner.clone()) {
                 Some(owner) => (Some(owner), AttributionSource::Recovered, None, is_new),
                 None => (
                     None,
                     AttributionSource::Unattributed,
-                    Some(UnattributedReason::OwnerGone),
+                    Some(if access_limited {
+                        UnattributedReason::AccessLimited
+                    } else {
+                        UnattributedReason::OwnerGone
+                    }),
                     is_new,
                 ),
-            },
-            _ => (
+            }
+        } else {
+            (
                 None,
                 AttributionSource::Unattributed,
                 Some(UnattributedReason::Ambiguous),
                 is_new,
-            ),
+            )
         };
-        self.observed.insert(key.clone(), result.0.clone());
+        self.observed.insert(
+            key.clone(),
+            ObservedSocket {
+                owner: result.0.clone(),
+                active: true,
+                last_seen: Instant::now(),
+            },
+        );
         result
     }
 
-    pub fn snapshot(&mut self, include_udp: bool, enhanced: bool) -> Result<Vec<Connection>> {
-        let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
-        let mut proto = ProtocolFlags::TCP;
-        if include_udp {
-            proto |= ProtocolFlags::UDP;
-        }
-
-        let traffic = if enhanced {
-            match traffic::snapshot() {
-                Ok(counters) => {
-                    self.traffic_status = NativeTrafficStatus::Available;
-                    counters
-                }
-                Err(error) => {
-                    self.traffic_status = NativeTrafficStatus::Unavailable(error.to_string());
-                    HashMap::new()
-                }
+    pub fn snapshot(
+        &mut self,
+        include_udp: bool,
+        enhanced: bool,
+    ) -> Result<Vec<ConnectionObservation>> {
+        self.events.ensure_started();
+        // Apply close events before reading the current socket table. If a
+        // tuple was destroyed and immediately reused, attribution below then
+        // treats the current socket as a new connection instead of silently
+        // folding it into the old one.
+        let mut out = self.drain_close_events();
+        process::refresh();
+        let snapshot = native::snapshot(include_udp, enhanced)
+            .context("failed to read native system socket table")?;
+        self.udp_status = if !include_udp {
+            UdpCollectionStatus::Disabled
+        } else if snapshot.udp_remote {
+            if snapshot.access_limited == 0 {
+                UdpCollectionStatus::Ready
+            } else {
+                UdpCollectionStatus::Degraded(format!(
+                    "Connected UDP peers collected; {} protected process{} could not be inspected",
+                    snapshot.access_limited,
+                    if snapshot.access_limited == 1 {
+                        ""
+                    } else {
+                        "es"
+                    }
+                ))
             }
         } else {
-            self.traffic_status = NativeTrafficStatus::Disabled;
-            HashMap::new()
+            UdpCollectionStatus::Unavailable(
+                snapshot
+                    .warnings
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "connected UDP collection is unavailable".into()),
+            )
         };
-        let sockets = get_sockets_info(af, proto).context("failed to read system socket table")?;
-        let mut out = Vec::with_capacity(sockets.len());
+        self.native_source = snapshot.source;
+        self.udp_remote = snapshot.udp_remote;
+        self.access_limited = snapshot.access_limited;
+        self.native_warnings = snapshot.warnings.clone();
+        self.traffic_status = if !enhanced {
+            NativeTrafficStatus::Disabled
+        } else if snapshot.traffic_counters {
+            NativeTrafficStatus::Available
+        } else {
+            NativeTrafficStatus::Unavailable(
+                "native TCP byte counters are unavailable for the active collector".into(),
+            )
+        };
 
-        for si in sockets {
-            let (protocol, local, remote, state) = match si.protocol_socket_info {
-                ProtocolSocketInfo::Tcp(tcp) => {
-                    let state = match tcp.state {
-                        TcpState::SynSent | TcpState::SynReceived => ConnState::Connecting,
-                        TcpState::Established => ConnState::Established,
-                        TcpState::FinWait1
-                        | TcpState::FinWait2
-                        | TcpState::CloseWait
-                        | TcpState::Closing
-                        | TcpState::LastAck => ConnState::Closing,
-                        TcpState::TimeWait => ConnState::TimeWait,
-                        TcpState::Listen => ConnState::Listen,
-                        TcpState::Closed | TcpState::DeleteTcb => ConnState::Closed,
-                        TcpState::Unknown => ConnState::Unknown,
-                    };
-                    // Focus on connections with a remote peer (active traffic)
-                    if matches!(state, ConnState::Listen) {
-                        continue;
-                    }
-                    if tcp.remote_addr.is_unspecified() || tcp.remote_port == 0 {
-                        continue;
-                    }
-                    (
-                        Protocol::Tcp,
-                        std::net::SocketAddr::new(tcp.local_addr, tcp.local_port),
-                        std::net::SocketAddr::new(tcp.remote_addr, tcp.remote_port),
-                        state,
-                    )
-                }
-                ProtocolSocketInfo::Udp(udp) => {
-                    // netstat2 only exposes local bind info for UDP (no remote peer).
-                    // Skip for now — outbound UDP destinations need OS-specific APIs.
-                    let _ = udp;
-                    if !include_udp {
-                        continue;
-                    }
-                    continue;
-                }
-            };
-
-            let key = SocketKey {
-                protocol,
-                local,
-                remote,
-            };
-            let owners: Vec<Owner> = si
-                .associated_pids
-                .into_iter()
-                .map(|pid| {
-                    let (name, path) = process::resolve(pid);
-                    Owner { pid, name, path }
-                })
-                .collect();
-            let (owner, attribution, reason, is_new) = self.attribute(&key, owners);
-            out.push(Connection {
-                pid: owner.as_ref().map(|owner| owner.pid),
-                process_name: owner
-                    .as_ref()
-                    .map(|owner| owner.name.clone())
-                    .unwrap_or_default(),
-                process_path: owner.as_ref().and_then(|owner| owner.path.clone()),
-                local,
-                remote,
-                protocol,
-                state,
-                attribution,
-                unattributed_reason: reason,
-                is_new,
-                traffic_counters: traffic.get(&key).map(|counters| {
-                    crate::model::SocketTrafficCounters {
-                        rx_bytes: counters.rx_bytes,
-                        tx_bytes: counters.tx_bytes,
-                    }
-                }),
+        out.reserve(snapshot.sockets.len());
+        for socket in snapshot.sockets {
+            let key = socket.key();
+            let owners = socket.pids.into_iter().map(process::resolve_info).collect();
+            let (owner, attribution, reason, is_new) =
+                self.attribute(&key, owners, self.access_limited > 0);
+            let processes = owner
+                .as_ref()
+                .map(|owner| owner.processes.clone())
+                .unwrap_or_default();
+            out.push(ConnectionObservation {
+                active: true,
+                connection: Connection {
+                    application_id: owner.as_ref().map(|owner| owner.app_id.clone()),
+                    pid: processes.first().map(|process| process.pid),
+                    process_name: owner
+                        .as_ref()
+                        .map(|owner| owner.app_name.clone())
+                        .unwrap_or_default(),
+                    process_path: owner.as_ref().and_then(|owner| owner.app_path.clone()),
+                    processes,
+                    local: socket.local,
+                    remote: socket.remote,
+                    protocol: socket.protocol,
+                    state: socket.state,
+                    attribution,
+                    unattributed_reason: reason,
+                    is_new,
+                    traffic_counters: socket.counters.map(|counters| {
+                        crate::model::SocketTrafficCounters {
+                            rx_bytes: counters.rx_bytes,
+                            tx_bytes: counters.tx_bytes,
+                        }
+                    }),
+                    destination_name: None,
+                },
             });
         }
 
-        let present: HashSet<_> = out.iter().map(Connection::socket_key).collect();
-        self.observed.retain(|key, _| present.contains(key));
+        let present: HashSet<_> = out
+            .iter()
+            .filter(|observation| observation.active)
+            .map(|observation| observation.connection.socket_key())
+            .collect();
 
+        let now = Instant::now();
+        for (key, observed) in &mut self.observed {
+            if observed.active && !present.contains(key) {
+                observed.active = false;
+                observed.last_seen = now;
+            }
+        }
+        self.observed.retain(|_, observed| {
+            observed.active || now.duration_since(observed.last_seen) <= OBSERVED_TTL
+        });
         Ok(out)
+    }
+
+    fn drain_close_events(&mut self) -> Vec<ConnectionObservation> {
+        self.events
+            .drain()
+            .into_iter()
+            .filter_map(|key| self.observe_close(key))
+            .collect()
+    }
+
+    fn observe_close(&mut self, key: SocketKey) -> Option<ConnectionObservation> {
+        let now = Instant::now();
+        if let Some(observed) = self.observed.get_mut(&key) {
+            if observed.active {
+                observed.active = false;
+                observed.last_seen = now;
+            }
+            return None;
+        }
+        self.observed.insert(
+            key.clone(),
+            ObservedSocket {
+                owner: None,
+                active: false,
+                last_seen: now,
+            },
+        );
+        Some(ConnectionObservation {
+            active: false,
+            connection: Connection {
+                application_id: None,
+                pid: None,
+                process_name: String::new(),
+                process_path: None,
+                processes: Vec::new(),
+                local: key.local,
+                remote: key.remote,
+                protocol: key.protocol,
+                state: ConnState::Closed,
+                attribution: AttributionSource::Unattributed,
+                unattributed_reason: Some(UnattributedReason::OwnerGone),
+                is_new: true,
+                traffic_counters: None,
+                destination_name: None,
+            },
+        })
     }
 
     pub fn reset(&mut self) {
         self.observed.clear();
+        self.events.clear();
     }
 
     pub fn traffic_status(&self) -> NativeTrafficStatus {
         self.traffic_status.clone()
+    }
+
+    pub fn udp_status(&self) -> UdpCollectionStatus {
+        self.udp_status.clone()
+    }
+
+    pub fn collection_status(&self) -> CollectionStatus {
+        let mut status = self.events.status();
+        status.source = self.native_source;
+        status.udp_remote = self.udp_remote;
+        status.access_limited = self.access_limited;
+        if !self.native_warnings.is_empty() && status.status == "ready" {
+            status.status = "degraded";
+            status.message = self.native_warnings.join("; ");
+        }
+        status
+    }
+
+    pub fn events_pending(&self) -> bool {
+        self.events.has_pending()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn key(port: u16) -> SocketKey {
         SocketKey {
-            protocol: Protocol::Tcp,
+            protocol: crate::model::Protocol::Tcp,
             local: format!("127.0.0.1:{port}").parse().unwrap(),
             remote: "203.0.113.1:443".parse().unwrap(),
         }
     }
 
-    fn owner(pid: u32, path: &str) -> Owner {
-        Owner {
+    fn owner(pid: u32, app: &str) -> ProcessIdentity {
+        ProcessIdentity {
+            id: format!("{pid}:1"),
             pid,
-            name: "browser".into(),
-            path: Some(path.into()),
+            start_time: 1,
+            name: "helper".into(),
+            path: Some(PathBuf::from(format!("/opt/{app}/helper"))),
+            parent_pid: None,
+            app_id: format!("/opt/{app}"),
+            app_name: app.into(),
+            app_path: Some(PathBuf::from(format!("/opt/{app}"))),
+            is_app_root: false,
         }
     }
 
     #[test]
-    fn exact_socket_recovers_owner_during_teardown() {
+    fn multiple_helpers_in_one_app_are_attributed() {
         let mut collector = SocketCollector::default();
-        let socket = key(41000);
-        let (_, source, _, is_new) = collector.attribute(&socket, vec![owner(10, "/bin/app")]);
+        let (group, source, reason, _) = collector.attribute(
+            &key(41000),
+            vec![owner(10, "browser"), owner(11, "browser")],
+            false,
+        );
         assert_eq!(source, AttributionSource::Direct);
-        assert!(is_new);
-
-        let (recovered, source, reason, is_new) = collector.attribute(&socket, vec![]);
-        assert_eq!(source, AttributionSource::Recovered);
-        assert_eq!(recovered.unwrap().pid, 10);
         assert_eq!(reason, None);
-        assert!(!is_new);
+        assert_eq!(group.unwrap().processes.len(), 2);
     }
 
     #[test]
-    fn missing_and_ambiguous_owners_are_not_guessed() {
+    fn cross_app_owners_remain_ambiguous() {
         let mut collector = SocketCollector::default();
-        let (_, source, reason, _) = collector.attribute(&key(41001), vec![]);
-        assert_eq!(source, AttributionSource::Unattributed);
-        assert_eq!(reason, Some(UnattributedReason::OwnerGone));
-
         let (_, source, reason, _) =
-            collector.attribute(&key(41002), vec![owner(10, "/bin/a"), owner(11, "/bin/b")]);
+            collector.attribute(&key(41001), vec![owner(10, "one"), owner(11, "two")], false);
         assert_eq!(source, AttributionSource::Unattributed);
         assert_eq!(reason, Some(UnattributedReason::Ambiguous));
+    }
+
+    #[test]
+    fn unseen_close_becomes_one_historical_observation() {
+        let mut collector = SocketCollector::default();
+        let socket = key(41002);
+        assert!(collector
+            .observe_close(socket.clone())
+            .is_some_and(|observation| !observation.active));
+        assert!(collector.observe_close(socket).is_none());
+    }
+
+    #[test]
+    fn observed_close_is_deduplicated_and_tuple_reuse_is_new() {
+        let mut collector = SocketCollector::default();
+        let socket = key(41003);
+        let (_, _, _, first_is_new) =
+            collector.attribute(&socket, vec![owner(10, "browser")], false);
+        assert!(first_is_new);
+        assert!(collector.observe_close(socket.clone()).is_none());
+
+        let (_, _, _, reused_is_new) =
+            collector.attribute(&socket, vec![owner(10, "browser")], false);
+        assert!(reused_is_new);
     }
 }

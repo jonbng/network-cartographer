@@ -1101,12 +1101,13 @@ dependencies = [
 
 [[package]]
 name = "network-cartographer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
  "dirs",
  "dns-lookup",
+ "futures-util",
  "maxminddb",
  "mime_guess",
  "netlink-packet-core",

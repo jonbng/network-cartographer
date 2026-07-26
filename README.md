@@ -12,7 +12,7 @@ macOS or Linux:
 curl -fsSL https://mapmy.network/run | sh
 ```
 
-Windows PowerShell:
+Windows PowerShell (x64 or ARM64):
 
 ```powershell
 irm https://mapmy.network/run.ps1 | iex
@@ -22,8 +22,11 @@ This starts Network Cartographer as a local CLI and opens the browser UI. Stop i
 
 ## Features
 
-- Live per-application TCP connection monitoring
-- Destination IP, hostname, port, organization, and activity
+- Live per-application TCP and connected UDP peer monitoring
+- Native ownership collectors (`sock_diag`/procfs on Linux, libproc on macOS, and IP Helper on Windows)
+- Parent-application grouping with the concrete helper PIDs retained for inspection
+- Event-assisted short-lived TCP discovery when Linux permits socket-diagnostic subscriptions, with portable polling fallback
+- Destination IP, domain, port, organization, and activity, with local DNS/SNI evidence when available
 - Background traceroutes and hop geolocation
 - Optional per-application upload/download rates on Linux
 - Search, application focus, route history, and density controls
@@ -85,11 +88,13 @@ site/         mapmy.network website and API proxy
 experiments/  Unsupported interface experiments
 ```
 
-The CLI reads OS socket tables, maps connections to processes, and streams snapshots to the local UI using Server-Sent Events. It runs as the current user and does not request elevated permissions. If traceroute is unavailable, connection monitoring still works.
+The CLI reads platform-native socket tables, maps TCP connections and connected UDP sockets to processes, and streams snapshots to the local UI using Server-Sent Events. Linux brackets its kernel socket dump with process-FD scans to reduce ownership races; macOS reads process descriptors through libproc; Windows reads owner-PID tables through IP Helper and inspects accessible connected UDP handles. It runs as the current user and does not request elevated permissions. If traceroute is unavailable, connection monitoring still works.
 
 ## Geolocation and privacy
 
-Connection and process data stays in the local CLI process. After the first-run privacy notice, public hop and destination IPs may be sent to `https://mapmy.network/api/v1/geo` for approximate geolocation.
+Connection, process, DNS-cache, and SNI observation data stays in the local CLI process. After the first-run privacy notice, public hop and destination IPs may be sent to `https://mapmy.network/api/v1/geo` for approximate geolocation.
+
+On Windows, destination identification watches changes in the current user's DNS client cache. Other platforms retain reverse DNS unless a local integration supplies exact TLS SNI. Integrations can discover the authenticated per-run feed in the `network-cartographer/runtime/observation-feed-<pid>.json` file below the user configuration directory, then POST `hostname`, `remoteIp`, and optional `remotePort`, `pid`, `localIp`, and `localPort` fields to its endpoint. The feed is loopback-only, uses a random bearer token, and is removed on normal shutdown.
 
 For offline geolocation, enable **Local geolocation** and provide MaxMind databases:
 
@@ -102,9 +107,13 @@ The app searches the project `data/` directory and common system GeoIP locations
 
 ## Limitations
 
-- TCP only; HTTPS payloads remain encrypted
-- UDP peers are not collected cross-platform
+- HTTPS and UDP payloads remain encrypted
+- Automatic OS DNS correlation is currently Windows-only; DNS-over-HTTPS and encrypted ClientHello can hide domain evidence
+- Shared CDN addresses use the most recently observed DNS answer and may occasionally receive the wrong label
+- UDP coverage is limited to connected sockets; destinations used only through unconnected `sendto()` calls are not visible without elevated packet capture
+- System, protected, or higher-integrity processes may not expose UDP peers to the current user
 - Short-lived connections may disappear between polling intervals
+- Linux close events require kernel permission and can recover missed destinations, but not always their process owner
 - Unprovable socket owners appear as **Unattributed traffic**
 - Per-application byte rates depend on OS support
 - Geolocation is approximate and the hosted service may be unavailable

@@ -23,7 +23,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 dns-lookup = "2"
-netstat2 = "0.11"
 sysinfo = "0.33"
 thiserror = "2"
 parking_lot = "0.12"
@@ -37,11 +36,24 @@ rust-embed = "8"
 mime_guess = "2"
 webbrowser = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+getrandom = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 netlink-packet-core = "0.7"
 netlink-packet-sock-diag = { version = "0.4.2", features = ["rich_nlas"] }
 netlink-sys = "0.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_System_Diagnostics_ProcessSnapshotting",
+    "Win32_System_Threading",
+] }
+
+[build-dependencies]
+cc = "1"
 
 [profile.release]
 lto = true

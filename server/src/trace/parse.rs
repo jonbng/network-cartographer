@@ -29,9 +29,7 @@ impl TraceResult {
 
     /// Whether traceroute received a reply from the exact requested target.
     pub fn reached_target(&self) -> bool {
-        self.hops
-            .iter()
-            .any(|hop| hop.addr == Some(self.target))
+        self.hops.iter().any(|hop| hop.addr == Some(self.target))
     }
 
     /// RTT reported by the target itself. Unlike `final_rtt_ms`, this is safe
@@ -306,10 +304,8 @@ traceroute to 1.1.1.1 (1.1.1.1), 20 hops max, 40 byte packets
         assert_eq!(partial.target_rtt_ms(), None);
         assert_eq!(partial.final_rtt_ms(), Some(8.0));
 
-        let complete = parse_traceroute_output(
-            target,
-            "1  192.168.1.1  1.0 ms\n2  1.1.1.1  12.0 ms\n",
-        );
+        let complete =
+            parse_traceroute_output(target, "1  192.168.1.1  1.0 ms\n2  1.1.1.1  12.0 ms\n");
         assert!(complete.reached_target());
         assert_eq!(complete.target_rtt_ms(), Some(12.0));
     }

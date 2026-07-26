@@ -50,10 +50,23 @@ type DestDto = {
   hits: number;
   lastSeenSecs: number;
   sni?: string | null;
+  domain?: string | null;
+  domainSource?: "tls-sni" | "os-dns" | "reverse-dns" | "ip";
+  processIds?: string[];
   asn?: number | null;
   org?: string | null;
   pathChanged?: boolean;
   trace: TraceDto;
+};
+
+type ProcessDto = {
+  id: string;
+  pid: number;
+  startTime: number;
+  name: string;
+  path?: string | null;
+  parentPid?: number | null;
+  isAppRoot: boolean;
 };
 
 type AppDto = {
@@ -61,6 +74,7 @@ type AppDto = {
   name: string;
   path?: string | null;
   pids: number[];
+  processes?: ProcessDto[];
   destCount: number;
   hits: number;
   hitsPerSec?: number;
@@ -87,6 +101,7 @@ type TrafficGroupDto = {
 };
 
 type SettingsDto = {
+  settingsVersion?: number;
   externalOnly: boolean;
   includeUdp: boolean;
   tracesEnabled: boolean;
@@ -95,7 +110,7 @@ type SettingsDto = {
   showLowConfidence?: boolean;
   confidenceMin?: number;
   globeDensity?: string;
-  captureSni?: boolean;
+  identifyDomains?: boolean;
   historyEnabled?: boolean;
   enhancedMonitoring?: boolean;
   privacyAccepted?: boolean;
@@ -113,10 +128,34 @@ type SnapshotDto = {
     unattributed: number;
     ambiguous: number;
     ownerGone: number;
+    accessLimited?: number;
     ratio: number;
   };
   unattributed?: TrafficGroupDto | null;
   monitoring?: { mode: string; status: string; message: string };
+  udpMonitoring?: {
+    enabled: boolean;
+    coverage: "connected";
+    status: "disabled" | "ready" | "degraded" | "unavailable";
+    message: string;
+  };
+  collection?: {
+    mode: string;
+    source: string;
+    capturesOpens: boolean;
+    capturesCloses: boolean;
+    droppedEvents: number;
+    status: string;
+    message: string;
+    udpRemote?: boolean;
+    accessLimited?: number;
+  };
+  destinationNaming?: {
+    enabled: boolean;
+    status: string;
+    sources: string[];
+    message: string;
+  };
   externalOnly: boolean;
   includeUdp: boolean;
   tracesEnabled: boolean;
@@ -138,6 +177,7 @@ type AppGroup = {
   currentConnections: number;
   newConnectionsPerSec: number;
   traffic: TrafficRateDto | null;
+  processes: ProcessDto[];
 };
 
 let snapshot: SnapshotDto | null = null;
@@ -173,11 +213,15 @@ const el = {
   status: document.getElementById("status-msg")!,
   filter: document.getElementById("filter") as HTMLInputElement,
   togExternal: document.getElementById("tog-external") as HTMLInputElement,
+  togUdp: document.getElementById("tog-udp") as HTMLInputElement,
+  udpStatus: document.getElementById("udp-status")!,
   togTraces: document.getElementById("tog-traces") as HTMLInputElement,
   togLabels: document.getElementById("tog-labels") as HTMLInputElement,
   togLocalGeo: document.getElementById("tog-local-geo") as HTMLInputElement,
   togHistory: document.getElementById("tog-history") as HTMLInputElement,
   togEnhanced: document.getElementById("tog-enhanced") as HTMLInputElement,
+  togDomains: document.getElementById("tog-domains") as HTMLInputElement,
+  domainsStatus: document.getElementById("domains-status")!,
   selDensity: document.getElementById("sel-density") as HTMLSelectElement,
   btnReset: document.getElementById("btn-reset")!,
   btnTraceAll: document.getElementById("btn-trace-all")!,
@@ -324,6 +368,7 @@ function collectAppGroups(paths: GlobePath[]): AppGroup[] {
       currentConnections: app.currentConnections ?? 0,
       newConnectionsPerSec: app.newConnectionsPerSec ?? app.hitsPerSec ?? 0,
       traffic: app.traffic ?? null,
+      processes: app.processes ?? [],
     };
     for (const dest of app.destinations) {
       if (!matchesFilter(app.name, dest)) continue;
@@ -373,7 +418,8 @@ function sidebarSignature(groups: AppGroup[]): string {
             `${p.host}:${p.port}:${p.status}:${p.hops.filter((h) => h.lat != null).length}`,
         )
         .join(";");
-      return `${g.name}|${g.traced}/${g.totalDests}|${g.activity.toFixed(1)}|${g.currentConnections}|${dests}`;
+      const processes = g.processes.map((process) => process.id).sort().join(",");
+      return `${g.name}|${g.traced}/${g.totalDests}|${g.activity.toFixed(1)}|${g.currentConnections}|${processes}|${dests}`;
     })
     .join("||");
   const unattributed = snapshot?.unattributed;
@@ -382,17 +428,16 @@ function sidebarSignature(groups: AppGroup[]): string {
 
 function currentSettings(): SettingsDto {
   return {
+    settingsVersion: 2,
     externalOnly: el.togExternal.checked,
-    // Retained in the settings schema for compatibility; remote UDP peers are
-    // not exposed by the current cross-platform socket collector.
-    includeUdp: false,
+    includeUdp: el.togUdp.checked,
     tracesEnabled: el.togTraces.checked,
     pollIntervalMs: 1000,
     geoLocalOnly: el.togLocalGeo.checked,
     showLowConfidence: true,
     confidenceMin: 0.45,
     globeDensity: el.selDensity.value,
-    captureSni: false,
+    identifyDomains: el.togDomains.checked,
     historyEnabled: el.togHistory.checked,
     enhancedMonitoring: el.togEnhanced.checked,
     privacyAccepted,
@@ -413,6 +458,12 @@ function paint(forceSidebar = false) {
   if (pendingSnap) {
     snapshot = pendingSnap;
     pendingSnap = null;
+  }
+  if (snapshot?.udpMonitoring) {
+    el.udpStatus.textContent = snapshot.udpMonitoring.message;
+  }
+  if (snapshot?.destinationNaming) {
+    el.domainsStatus.textContent = snapshot.destinationNaming.message;
   }
 
   const allPaths = collectPaths(false);
@@ -439,6 +490,8 @@ function paint(forceSidebar = false) {
       mapPaths.length,
       snapshot.geoBackend,
       snapshot.monitoring?.status,
+      snapshot.collection?.status,
+      snapshot.collection?.droppedEvents,
       [...focused].join(","),
       el.selDensity.value,
     ].join("|");
@@ -469,7 +522,20 @@ function paint(forceSidebar = false) {
       const trafficError = telemetry?.status === "unavailable"
         ? ` · traffic rates unavailable: ${telemetry.message}`
         : "";
-      el.status.textContent = `Live · ${snapshot.liveConnections} conns · ${mapPaths.length} paths${quality}${recovered}${traffic}${trafficError}`;
+      const collection = snapshot.collection;
+      const collectionMode = collection?.mode === "event-assisted"
+        ? " · TCP close events on"
+        : " · TCP polling";
+      const collectionWarning = collection?.status === "degraded"
+        ? ` · collector degraded: ${collection.message}`
+        : "";
+      const accessLimited = collection?.accessLimited
+        ? ` · ${collection.accessLimited} protected processes skipped`
+        : "";
+      const dropped = collection?.droppedEvents
+        ? ` · ${collection.droppedEvents} events dropped`
+        : "";
+      el.status.textContent = `Live · ${snapshot.liveConnections} conns · ${mapPaths.length} paths${quality}${recovered}${collectionMode}${collectionWarning}${accessLimited}${dropped}${traffic}${trafficError}`;
       el.btnClearFocus.hidden = focused.size === 0;
       el.sidebarSub.textContent =
         focused.size === 0
@@ -539,6 +605,17 @@ function renderSidebar(groups: AppGroup[]) {
         : g.newConnectionsPerSec > 0.05
           ? `<span class="act"> · ${g.newConnectionsPerSec.toFixed(1)} new/s</span>`
           : "";
+      const processRows = isOpen && g.processes.length
+        ? `<div class="process-list" aria-label="Owning processes">${g.processes
+            .slice()
+            .sort((a, b) => a.pid - b.pid)
+            .map(
+              (process) => `<div class="process-row" title="${escapeHtml(process.path ?? process.name)}">
+                <span>${escapeHtml(process.name)}</span><code>PID ${process.pid}</code>
+              </div>`,
+            )
+            .join("")}</div>`
+        : "";
 
       const destRows = isOpen
         ? g.paths
@@ -562,17 +639,26 @@ function renderSidebar(groups: AppGroup[]) {
               const changed = destMeta?.pathChanged
                 ? ` <span class="badge run">path Δ</span>`
                 : "";
+              const nameSource = destMeta?.domainSource
+                ? ` · name: ${destMeta.domainSource}`
+                : "";
+              const owners = g.processes.filter((process) =>
+                destMeta?.processIds?.includes(process.id),
+              );
+              const ownerLabel = owners.length
+                ? ` · ${owners.map((process) => `${process.name} (${process.pid})`).join(", ")}`
+                : "";
               const marker = p.reachedTarget ? "★" : "◌";
               const traceState = p.reachedTarget
                 ? `${mapped} mapped`
                 : p.status === "done"
                   ? "partial"
                   : statusBadge(p.status);
-              return `<button type="button" class="dest-row${destMeta?.pathChanged ? " flash" : ""}${routeInspector.selectedRouteId === p.id ? " selected" : ""}" data-route-id="${escapeHtml(p.id)}" data-dest-host="${escapeHtml(p.host)}" title="Inspect route to ${escapeHtml(p.ip)}" aria-pressed="${routeInspector.selectedRouteId === p.id}">
+              return `<button type="button" class="dest-row${destMeta?.pathChanged ? " flash" : ""}${routeInspector.selectedRouteId === p.id ? " selected" : ""}" data-route-id="${escapeHtml(p.id)}" data-dest-host="${escapeHtml(p.host)}" title="Inspect route to ${escapeHtml(p.ip)}${escapeHtml(nameSource)}" aria-pressed="${routeInspector.selectedRouteId === p.id}">
                 <span class="dest-star${p.reachedTarget ? "" : " partial"}">${marker}</span>
                 <span class="dest-main">
                   <span class="dest-host">${escapeHtml(p.host)}${org}${changed}</span>
-                  <span class="dest-meta">:${p.port} · ${escapeHtml(p.protocol)} · ${p.reachedTarget ? rtt : `last reply ${rtt}`}${destCity}</span>
+                  <span class="dest-meta">:${p.port} · ${escapeHtml(p.protocol)} · ${p.reachedTarget ? rtt : `last reply ${rtt}`}${destCity}${escapeHtml(ownerLabel)}</span>
                 </span>
                 <span class="dest-side">${mapped > 0 ? traceState : statusBadge(p.status)}</span>
               </button>`;
@@ -589,7 +675,7 @@ function renderSidebar(groups: AppGroup[]) {
           </span>
           <span class="chev">${isOpen ? "▾" : "▸"}</span>
         </button>
-        ${isOpen ? `<div class="dest-list">${destRows || `<div class="empty sm">No destinations</div>`}</div>` : ""}
+        ${isOpen ? `${processRows}<div class="dest-list">${destRows || `<div class="empty sm">No destinations</div>`}</div>` : ""}
       </div>`;
     })
     .join("");
@@ -602,6 +688,7 @@ function renderUnattributed(group: TrafficGroupDto | null): string {
   const reasons = [
     stats?.ownerGone ? `${stats.ownerGone} owner unavailable` : "",
     stats?.ambiguous ? `${stats.ambiguous} ambiguous` : "",
+    stats?.accessLimited ? `${stats.accessLimited} access-limited` : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -697,10 +784,12 @@ function wireUi() {
 
   for (const t of [
     el.togExternal,
+    el.togUdp,
     el.togTraces,
     el.togLocalGeo,
     el.togHistory,
     el.togEnhanced,
+    el.togDomains,
   ]) {
     t.addEventListener("change", () => {
       void pushSettings();
@@ -821,7 +910,9 @@ async function boot() {
     const settings = await invoke<SettingsDto>("get_settings");
     privacyAccepted = !!settings.privacyAccepted;
     el.togEnhanced.checked = !!settings.enhancedMonitoring;
+    el.togDomains.checked = settings.identifyDomains !== false;
     el.togExternal.checked = settings.externalOnly;
+    el.togUdp.checked = settings.includeUdp;
     el.togTraces.checked = settings.tracesEnabled;
     el.togLocalGeo.checked = !!settings.geoLocalOnly;
     el.togHistory.checked = !!settings.historyEnabled;

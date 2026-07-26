@@ -1,6 +1,8 @@
 use std::{
     convert::Infallible,
+    fs,
     net::{IpAddr, SocketAddr},
+    path::PathBuf,
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -8,7 +10,7 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{header, HeaderMap, StatusCode, Uri},
     middleware::{self, Next},
     response::{sse::Event, IntoResponse, Response, Sse},
@@ -16,11 +18,12 @@ use axum::{
     Json, Router,
 };
 use rust_embed::RustEmbed;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
 use crate::{
+    collect::SniObservation,
     dto::{PathChangedEvent, SettingsDto, SnapshotDto},
     monitor::Monitor,
 };
@@ -34,11 +37,12 @@ struct AppState {
     monitor: Arc<Monitor>,
     events: broadcast::Sender<ServerEvent>,
     shutdown: broadcast::Sender<()>,
+    observation_token: Arc<str>,
 }
 
 #[derive(Clone)]
 enum ServerEvent {
-    Snapshot(SnapshotDto),
+    Snapshot(Box<SnapshotDto>),
     Error(String),
     PathChanged(PathChangedEvent),
 }
@@ -53,12 +57,14 @@ pub async fn run() -> Result<(), String> {
     let monitor = Arc::new(Monitor::new());
     let (events, _) = broadcast::channel(32);
     let (shutdown, _) = broadcast::channel(1);
+    let observation_token: Arc<str> = generate_observation_token()?.into();
     spawn_background_tasks(Arc::clone(&monitor), events.clone());
 
     let state = AppState {
         monitor,
         events,
         shutdown: shutdown.clone(),
+        observation_token: Arc::clone(&observation_token),
     };
     let app = Router::new()
         .route("/api/version", get(version))
@@ -67,6 +73,10 @@ pub async fn run() -> Result<(), String> {
         .route("/api/settings", get(settings).put(update_settings))
         .route("/api/reset", post(reset))
         .route("/api/trace-all", post(trace_all))
+        .route(
+            "/api/observations/sni",
+            post(record_sni).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route("/api/events", get(event_stream))
         .fallback(get(static_asset))
         .with_state(state)
@@ -80,6 +90,13 @@ pub async fn run() -> Result<(), String> {
         .local_addr()
         .map_err(|error| format!("could not read server address: {error}"))?;
     let url = format!("http://{address}");
+    let _feed_discovery = match FeedDiscovery::write(&url, &observation_token) {
+        Ok(discovery) => Some(discovery),
+        Err(error) => {
+            eprintln!("  Domains    SNI feed discovery unavailable ({error})");
+            None
+        }
+    };
 
     if std::env::var_os("NETCART_LAUNCHED").is_none() {
         println!("Network Cartographer");
@@ -166,6 +183,30 @@ async fn trace_all(
     let ips = state.monitor.state.lock().unique_remote_ips();
     state.monitor.traces.lock().force_many(ips);
     Ok(StatusCode::ACCEPTED)
+}
+
+async fn record_sni(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(observation): Json<SniObservation>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let expected = format!("Bearer {}", state.observation_token);
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some(expected.as_str())
+    {
+        return Err((StatusCode::UNAUTHORIZED, "invalid observation token".into()));
+    }
+    state.monitor.record_sni(observation).map_err(|error| {
+        let status = if error.contains("disabled") {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        (status, error)
+    })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn event_stream(
@@ -274,6 +315,17 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
     {
         let monitor = Arc::clone(&monitor);
         thread::Builder::new()
+            .name("domain-observer".into())
+            .spawn(move || loop {
+                monitor.poll_domain_sources();
+                thread::sleep(Duration::from_secs(2));
+            })
+            .expect("spawn destination domain observer");
+    }
+
+    {
+        let monitor = Arc::clone(&monitor);
+        thread::Builder::new()
             .name("geo-warm".into())
             .spawn(move || loop {
                 let settings = monitor.settings.lock().clone();
@@ -321,10 +373,12 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
             loop {
                 let interval =
                     Duration::from_millis(monitor.settings.lock().poll_interval_ms.max(500));
-                if last_socket_poll.elapsed() >= interval {
+                let event_ready = monitor.collection_events_pending()
+                    && last_socket_poll.elapsed() >= Duration::from_millis(100);
+                if last_socket_poll.elapsed() >= interval || event_ready {
                     match monitor.tick() {
                         Ok(snapshot) => {
-                            let _ = events.send(ServerEvent::Snapshot(snapshot));
+                            let _ = events.send(ServerEvent::Snapshot(Box::new(snapshot)));
                             for change in monitor.drain_path_change_events() {
                                 let _ = events.send(ServerEvent::PathChanged(change));
                             }
@@ -342,7 +396,7 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
                     if (geo_progressed || pending > 0)
                         && last_geo_emit.elapsed() >= Duration::from_millis(1500)
                     {
-                        let _ = events.send(ServerEvent::Snapshot(monitor.snapshot()));
+                        let _ = events.send(ServerEvent::Snapshot(Box::new(monitor.snapshot())));
                         last_geo_emit = Instant::now();
                         last_pending_geo = pending;
                     }
@@ -351,6 +405,95 @@ fn spawn_background_tasks(monitor: Arc<Monitor>, events: broadcast::Sender<Serve
             }
         })
         .expect("spawn monitor poll loop");
+}
+
+fn generate_observation_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|error| error.to_string())?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeedDiscoveryDocument {
+    pid: u32,
+    endpoint: String,
+    token: String,
+}
+
+struct FeedDiscovery {
+    path: PathBuf,
+}
+
+impl FeedDiscovery {
+    fn write(base_url: &str, token: &str) -> Result<Self, String> {
+        let directory = dirs::config_dir()
+            .ok_or_else(|| "no config directory for SNI feed discovery".to_string())?
+            .join("network-cartographer")
+            .join("runtime");
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        remove_stale_feed_files(&directory);
+        let path = directory.join(format!("observation-feed-{}.json", std::process::id()));
+        let document = FeedDiscoveryDocument {
+            pid: std::process::id(),
+            endpoint: format!("{base_url}/api/observations/sni"),
+            token: token.into(),
+        };
+        let bytes = serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?;
+
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|error| error.to_string())?;
+            file.write_all(&bytes).map_err(|error| error.to_string())?;
+        }
+        #[cfg(not(unix))]
+        fs::write(&path, bytes).map_err(|error| error.to_string())?;
+
+        Ok(Self { path })
+    }
+}
+
+fn remove_stale_feed_files(directory: &std::path::Path) {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_feed = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("observation-feed-") && name.ends_with(".json"));
+        if !is_feed {
+            continue;
+        }
+        let document = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<FeedDiscoveryDocument>(&bytes).ok());
+        let stale = document.is_none_or(|document| {
+            system
+                .process(sysinfo::Pid::from_u32(document.pid))
+                .is_none()
+        });
+        if stale {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+impl Drop for FeedDiscovery {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 struct Options {
@@ -384,5 +527,51 @@ impl Options {
         }
 
         Ok(Self { port, open_browser })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state(token: &str) -> AppState {
+        let (events, _) = broadcast::channel(2);
+        let (shutdown, _) = broadcast::channel(1);
+        AppState {
+            monitor: Arc::new(Monitor::new()),
+            events,
+            shutdown,
+            observation_token: Arc::from(token),
+        }
+    }
+
+    fn observation() -> SniObservation {
+        SniObservation {
+            hostname: "www.example.com".into(),
+            remote_ip: "203.0.113.10".parse().unwrap(),
+            remote_port: Some(443),
+            pid: None,
+            local_ip: None,
+            local_port: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn sni_feed_requires_bearer_token() {
+        let result = record_sni(
+            State(test_state("secret")),
+            HeaderMap::new(),
+            Json(observation()),
+        )
+        .await;
+        assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn sni_feed_accepts_valid_observation() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
+        let result = record_sni(State(test_state("secret")), headers, Json(observation())).await;
+        assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
     }
 }

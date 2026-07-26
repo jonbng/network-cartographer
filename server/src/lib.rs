@@ -17,8 +17,9 @@ pub mod standalone {
     use std::{net::IpAddr, sync::Arc};
 
     pub use crate::dto::{
-        AppDto, AttributionStatsDto, DestDto, HopDto, MonitoringDto, SettingsDto, SnapshotDto,
-        TraceDto, TraceStatsDto, TrafficGroupDto, TrafficRateDto,
+        AppDto, AttributionStatsDto, CollectionDto, DestDto, DestinationNamingDto, HopDto,
+        MonitoringDto, ProcessDto, SettingsDto, SnapshotDto, TraceDto, TraceStatsDto,
+        TrafficGroupDto, TrafficRateDto, UdpMonitoringDto,
     };
 
     use crate::monitor::Monitor;

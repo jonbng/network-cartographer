@@ -117,6 +117,10 @@
               <input type="checkbox" id="tog-external" checked />
             </label>
             <label class="setting-row">
+              <span><strong>UDP peers</strong><small id="udp-status">Connected sockets, no administrator access</small></span>
+              <input type="checkbox" id="tog-udp" checked />
+            </label>
+            <label class="setting-row">
               <span><strong>Traceroutes</strong><small>Map path hops</small></span>
               <input type="checkbox" id="tog-traces" checked />
             </label>
@@ -135,6 +139,10 @@
             <label class="setting-row">
               <span><strong>Traffic rates</strong><small>Native per-app upload and download</small></span>
               <input type="checkbox" id="tog-enhanced" />
+            </label>
+            <label class="setting-row">
+              <span><strong>Destination domains</strong><small id="domains-status">Use local DNS and SNI observations</small></span>
+              <input type="checkbox" id="tog-domains" checked />
             </label>
             <label class="density-row" for="sel-density">
               <span><strong>Node density</strong><small>Detail shown on globe</small></span>
